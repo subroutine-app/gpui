@@ -426,6 +426,18 @@ adds the same line.
   a font run and lays Hebrew out from right to left, and those at the end of `line.rs` check the
   resolved ranges against painting each range in turn, on random sets of ranges.
 
+### Subroutine's changes
+
+[Subroutine's fork](https://github.com/subroutine-app/gpui) adds these on top of Mesa Hills
+Research's. Each of upstream's files they touch also starts with a line saying Subroutine modified
+it, after Mesa Hills Research's line where there is one. GPUI Kit vendored most of them into its
+copy of the gpui-pre 0.3.11 crates first, and they are ported here onto the fork's code.
+
+- **Edges that serialize**, in `mhr-gpui`'s `src/geometry.rs`. `Edges` derives `Serialize`,
+  `Deserialize` and `JsonSchema`, as its refinement already did, so a type that holds edges, such
+  as a filter's fade bands, can derive them too. `mhr-gpui-apple`'s copy of `geometry.rs` under
+  `vendor/gpui` follows it.
+
 ## The mobile crate
 
 `crates/gpui_mobile` follows [longbridge/gpui-mobile](https://github.com/longbridge/gpui-mobile)

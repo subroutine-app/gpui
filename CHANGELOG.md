@@ -37,6 +37,10 @@ gpui no longer uses them.
 - `gpui_macos::MacTextSystem`, which `mhr-gpui-macos` exported under `test-support`, is gone.
   Tests use `gpui_apple::AppleTextSystem` with `mhr-gpui-apple`'s `font-kit` feature.
 
+### From Subroutine's fork
+
+- `Edges` serializes, deserializes and has a JSON schema, like its refinement.
+
 ## 0.1.9
 
 Published as `mhr-gpui`, `mhr-gpui-wgpu`, `mhr-gpui-linux`, `mhr-gpui-windows`,

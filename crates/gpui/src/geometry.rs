@@ -1,4 +1,5 @@
 // Modified by Mesa Hills Research, as docs/upstream.md in mesa-hills-research/gpui describes.
+// Modified by Subroutine, as docs/upstream.md in subroutine-app/gpui describes.
 //! The GPUI geometry module is a collection of types and traits that
 //! can be used to describe common units, concepts, and the relationships
 //! between them.
@@ -1748,7 +1749,7 @@ impl Bounds<DevicePixels> {
 /// assert_eq!(edges.bottom, 30.0);
 /// assert_eq!(edges.left, 40.0);
 /// ```
-#[derive(Refineable, Clone, Default, Debug, Eq, PartialEq)]
+#[derive(Refineable, Clone, Default, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[refineable(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[repr(C)]
 pub struct Edges<T: Clone + Debug + Default + PartialEq> {
