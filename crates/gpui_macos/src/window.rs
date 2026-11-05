@@ -1,3 +1,4 @@
+// Modified by Subroutine, as docs/upstream.md in subroutine-app/gpui describes.
 use crate::{
     BoolExt, MacDisplay, MetalFrames, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
     TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
@@ -14,7 +15,8 @@ use gpui::{
     Pixels, PlatformAtlas, PlatformDisplay, PlatformFrameSignal, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
     SharedString, Size, SystemWindowTab, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowKind, WindowParams, WindowVisibility, point, px, size,
+    WindowBounds, WindowControlArea, WindowKind, WindowParams, WindowToolbarStyle,
+    WindowVisibility, point, px, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -28,7 +30,7 @@ use futures::channel::oneshot;
 use gpui_apple::display_link::MetalFrameSource;
 use gpui_util::ResultExt;
 use objc2::{
-    AnyThread, MainThreadMarker, Message, class, msg_send,
+    AnyThread, MainThreadMarker, MainThreadOnly, Message, class, msg_send,
     rc::{Retained, autoreleasepool},
     runtime::{AnyClass, AnyObject, AnyProtocol, Bool, ClassBuilder, ProtocolObject, Sel},
     sel,
@@ -42,16 +44,17 @@ use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSAppearance, NSAutoresizingMaskOptions, NSBackingStoreType, NSBeep,
     NSButton, NSColor, NSDragOperation, NSDraggingContext, NSDraggingImageComponent,
     NSDraggingImageComponentIconKey, NSDraggingItem, NSEventModifierFlags, NSEventType,
-    NSPasteboardWriting, NSRequestUserAttentionType, NSScreen, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSViewLayerContentsRedrawPolicy, NSVisualEffectBlendingMode,
-    NSVisualEffectMaterial, NSVisualEffectState, NSWindow, NSWindowAnimationBehavior,
-    NSWindowButton, NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowOrderingMode,
-    NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
+    NSPasteboardWriting, NSRequestUserAttentionType, NSScreen, NSTitlebarSeparatorStyle, NSToolbar,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSViewLayerContentsRedrawPolicy,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSWindow,
+    NSWindowAnimationBehavior, NSWindowButton, NSWindowCollectionBehavior, NSWindowOcclusionState,
+    NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility, NSWindowToolbarStyle,
+    NSWorkspace,
 };
 use objc2_core_graphics::CGColor;
 use objc2_foundation::{
     NSArray, NSInteger, NSNotFound, NSOperatingSystemVersion, NSPoint, NSProcessInfo, NSRect,
-    NSSize, NSString, NSUInteger, NSURL,
+    NSSize, NSString, NSUInteger, NSURL, ns_string,
 };
 use objc2_uniform_type_identifiers::{UTType, UTTypeData, UTTypeFolder};
 use parking_lot::Mutex;
@@ -439,6 +442,10 @@ unsafe fn build_window_class(name: &CStr, superclass: &AnyClass) -> *const AnyCl
             window_will_exit_fullscreen as extern "C" fn(_, Sel, *mut AnyObject),
         );
         decl.add_method(
+            sel!(windowDidFailToEnterFullScreen:),
+            window_did_fail_to_enter_fullscreen as extern "C" fn(_, Sel, *mut AnyObject),
+        );
+        decl.add_method(
             sel!(windowDidFailToExitFullScreen:),
             window_did_fail_to_exit_fullscreen as extern "C" fn(_, Sel, *mut AnyObject),
         );
@@ -680,6 +687,7 @@ struct MacWindowState {
     traffic_light_frames: Option<TrafficLightFrames>,
     pre_fullscreen_traffic_light_frames: Option<TrafficLightFrames>,
     transparent_titlebar: bool,
+    titlebar_toolbar: Option<Retained<NSToolbar>>,
     previous_modifiers_changed_event: Option<PlatformInput>,
     keystroke_for_do_command: Option<Keystroke>,
     do_command_handled: Option<bool>,
@@ -1102,6 +1110,20 @@ impl MacWindow {
                 setReleasedWhenClosed: Bool::NO
             ];
 
+            let titlebar_toolbar = titlebar
+                .as_ref()
+                .and_then(|titlebar| titlebar.toolbar_style)
+                .filter(|_| {
+                    is_macos_version_at_least(NSOperatingSystemVersion {
+                        majorVersion: 26,
+                        minorVersion: 0,
+                        patchVersion: 0,
+                    })
+                })
+                .map(|style| {
+                    install_titlebar_toolbar(&*native_window.cast::<NSWindow>(), style, marker)
+                });
+
             let content_view: *mut AnyObject = msg_send![native_window, contentView];
             let native_view: *mut AnyObject = msg_send![VIEW_CLASS, alloc];
             let content_bounds: NSRect = msg_send![content_view, bounds];
@@ -1147,6 +1169,7 @@ impl MacWindow {
                 transparent_titlebar: titlebar
                     .as_ref()
                     .is_none_or(|titlebar| titlebar.appears_transparent),
+                titlebar_toolbar,
                 previous_modifiers_changed_event: None,
                 keystroke_for_do_command: None,
                 do_command_handled: None,
@@ -3078,24 +3101,34 @@ extern "C" fn window_did_resize(this: &AnyObject, _: Sel, _: *mut AnyObject) {
 
 extern "C" fn window_will_enter_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     let window_state = unsafe { get_window_state(this) };
-    let mut lock = window_state.as_ref().lock();
-    lock.fullscreen_restore_bounds = lock.bounds();
-    lock.is_exiting_fullscreen = false;
-    lock.pre_fullscreen_traffic_light_frames = lock.traffic_light_frames;
-    lock.restore_traffic_light();
-
-    let min_version = NSOperatingSystemVersion {
-        majorVersion: 15,
-        minorVersion: 3,
-        patchVersion: 0,
+    let (native_window, toolbar) = {
+        let mut lock = window_state.as_ref().lock();
+        lock.fullscreen_restore_bounds = lock.bounds();
+        lock.is_exiting_fullscreen = false;
+        lock.pre_fullscreen_traffic_light_frames = lock.traffic_light_frames;
+        lock.restore_traffic_light();
+        (lock.native_window, lock.titlebar_toolbar.clone())
     };
 
-    if is_macos_version_at_least(min_version) {
+    // A visible toolbar would get an empty fullscreen toolbar window that takes the input above
+    // it. Laying the toolbar out can call back into GPUI, so no lock is held.
+    if let Some(toolbar) = toolbar {
+        toolbar.setVisible(false);
+    }
+    if is_macos_version_at_least(TITLEBAR_TRANSPARENCY_VERSION) {
         unsafe {
-            let _: () = msg_send![lock.native_window, setTitlebarAppearsTransparent: Bool::NO];
+            let _: () = msg_send![native_window, setTitlebarAppearsTransparent: Bool::NO];
         }
     }
 }
+
+/// From this version, a fullscreen window shows an opaque titlebar while its windowed titlebar
+/// is transparent.
+const TITLEBAR_TRANSPARENCY_VERSION: NSOperatingSystemVersion = NSOperatingSystemVersion {
+    majorVersion: 15,
+    minorVersion: 3,
+    patchVersion: 0,
+};
 
 extern "C" fn window_will_exit_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     let window_state = unsafe { get_window_state(this) };
@@ -3122,18 +3155,72 @@ extern "C" fn window_did_fail_to_exit_fullscreen(this: &AnyObject, _: Sel, _: *m
     let mut lock = window_state.as_ref().lock();
     lock.is_exiting_fullscreen = false;
     lock.restore_traffic_light();
+    // Still fullscreen, so the titlebar the exit made transparent is opaque again.
+    if is_macos_version_at_least(TITLEBAR_TRANSPARENCY_VERSION) {
+        unsafe {
+            let _: () = msg_send![lock.native_window, setTitlebarAppearsTransparent: Bool::NO];
+        }
+    }
+}
+
+extern "C" fn window_did_fail_to_enter_fullscreen(
+    this: &AnyObject,
+    sel: Sel,
+    notification: *mut AnyObject,
+) {
+    // A failed entry gets no will-exit notification, so the windowed titlebar comes back here.
+    let window_state = unsafe { get_window_state(this) };
+    let (native_window, transparent) = {
+        let lock = window_state.as_ref().lock();
+        (lock.native_window, lock.transparent_titlebar)
+    };
+    if transparent && is_macos_version_at_least(TITLEBAR_TRANSPARENCY_VERSION) {
+        unsafe {
+            let _: () = msg_send![native_window, setTitlebarAppearsTransparent: Bool::YES];
+        }
+    }
+    window_did_exit_fullscreen(this, sel, notification);
 }
 
 extern "C" fn window_did_exit_fullscreen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     // SAFETY: This method is registered only on GPUI window classes, which initialize
     // WINDOW_STATE_IVAR with an Rc<Mutex<MacWindowState>> during window creation.
     let window_state = unsafe { get_window_state(this) };
-    let mut lock = window_state.as_ref().lock();
-    lock.is_exiting_fullscreen = false;
-    // Moving the buttons during the transition captures their fullscreen frames.
-    // Keep using the native windowed frames when restoring them on the next entry.
-    lock.traffic_light_frames = lock.pre_fullscreen_traffic_light_frames.take();
-    lock.move_traffic_light();
+    let toolbar = {
+        let mut lock = window_state.as_ref().lock();
+        lock.is_exiting_fullscreen = false;
+        // Moving the buttons during the transition captures their fullscreen frames.
+        // Keep using the native windowed frames when restoring them on the next entry.
+        lock.traffic_light_frames = lock.pre_fullscreen_traffic_light_frames.take();
+        lock.titlebar_toolbar.clone()
+    };
+    // Showing the toolbar lays out the titlebar, so the buttons move after it.
+    if let Some(toolbar) = toolbar {
+        toolbar.setVisible(true);
+    }
+    window_state.as_ref().lock().move_traffic_light();
+}
+
+/// Gives `window` an empty toolbar in `style`, for the window chrome that comes with it.
+fn install_titlebar_toolbar(
+    window: &NSWindow,
+    style: WindowToolbarStyle,
+    marker: MainThreadMarker,
+) -> Retained<NSToolbar> {
+    let toolbar =
+        NSToolbar::initWithIdentifier(NSToolbar::alloc(marker), ns_string!("GPUI.Titlebar"));
+    toolbar.setAllowsUserCustomization(false);
+    toolbar.setAllowsDisplayModeCustomization(false);
+    toolbar.setAutosavesConfiguration(false);
+    toolbar.setAllowsExtensionItems(false);
+    window.setToolbarStyle(match style {
+        WindowToolbarStyle::Unified => NSWindowToolbarStyle::Unified,
+        WindowToolbarStyle::UnifiedCompact => NSWindowToolbarStyle::UnifiedCompact,
+    });
+    window.setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None);
+    window.setToolbar(Some(&toolbar));
+    toolbar.setVisible(true);
+    toolbar
 }
 
 pub(crate) fn is_macos_version_at_least(version: NSOperatingSystemVersion) -> bool {

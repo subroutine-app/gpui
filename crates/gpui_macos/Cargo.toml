@@ -21,6 +21,10 @@ path = "src/gpui_macos.rs"
 doctest = false
 name = "gpui_macos"
 
+[[example]]
+name = "window_toolbar"
+required-features = ["font-kit"]
+
 [features]
 default = ["gpui/default"]
 bench-support = ["gpui/bench-support", "gpui_apple/bench-support"]
@@ -51,7 +55,7 @@ image = { workspace = true }
 itertools = { workspace = true }
 log = { workspace = true }
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["objc2-uniform-type-identifiers"] }
+objc2-app-kit = { workspace = true, features = ["NSToolbar", "objc2-uniform-type-identifiers"] }
 objc2-core-graphics = { workspace = true, features = ["CGColor", "objc2"] }
 objc2-core-media = { workspace = true, optional = true }
 objc2-core-video = { workspace = true, features = ["CVHostTime"] }

@@ -1,4 +1,5 @@
 // Modified by Mesa Hills Research, as docs/upstream.md in mesa-hills-research/gpui describes.
+// Modified by Subroutine, as docs/upstream.md in subroutine-app/gpui describes.
 mod app_menu;
 mod keyboard;
 mod keystroke;
@@ -2861,11 +2862,7 @@ impl Default for WindowOptions {
     fn default() -> Self {
         Self {
             window_bounds: None,
-            titlebar: Some(TitlebarOptions {
-                title: Default::default(),
-                appears_transparent: Default::default(),
-                traffic_light_position: Default::default(),
-            }),
+            titlebar: Some(TitlebarOptions::default()),
             focus: true,
             show: true,
             kind: WindowKind::Normal,
@@ -2900,6 +2897,26 @@ pub struct TitlebarOptions {
 
     /// The position of the macOS traffic light buttons
     pub traffic_light_position: Option<Point<Pixels>>,
+
+    /// Native toolbar window chrome on macOS 26 and later, which gives the window the corners
+    /// and shadow that AppKit draws for a window with a toolbar.
+    ///
+    /// The window gets an empty `NSToolbar`, so with `appears_transparent` GPUI still draws the
+    /// whole header. AppKit owns the corner radius, and the window's background is unchanged.
+    /// The toolbar hides in fullscreen. Native tabs still take titlebar space, so a window that
+    /// draws its own header normally sets no `tabbing_identifier`. `None`, older macOS versions
+    /// and other platforms keep the window as it was.
+    pub toolbar_style: Option<WindowToolbarStyle>,
+}
+
+/// The native toolbar chrome of a macOS window. The corners follow the system rather than a
+/// radius in pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowToolbarStyle {
+    /// A full-height unified toolbar, with the larger corners of a window with a toolbar.
+    Unified,
+    /// A compact unified toolbar, with the smaller corners of a compact toolbar window.
+    UnifiedCompact,
 }
 
 /// The kind of window to create

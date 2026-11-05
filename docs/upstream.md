@@ -512,6 +512,30 @@ copy of the gpui-pre 0.3.11 crates first, and they are ported here onto the fork
   under `test-support`, returns what the window painted last, so a test outside the crate can
   check the primitives a frame drew, such as the opacity or translation of a paint effect. A test
   in `window.rs` covers it. `mhr-gpui-apple`'s copy of `window.rs` under `vendor/gpui` follows it.
+- **Toolbar window chrome on macOS**, in `mhr-gpui`'s `src/platform.rs` and `mhr-gpui-macos`'
+  `src/window.rs` and `Cargo.toml`. On macOS 26 a window with a toolbar gets larger corners and
+  its own shadow, which a GPUI window, with no toolbar, never had.
+  `TitlebarOptions::toolbar_style` takes a `WindowToolbarStyle`, `Unified` or `UnifiedCompact`,
+  and the window gets an empty `NSToolbar` in that style, with no separator under the titlebar,
+  so GPUI still draws the whole header when `appears_transparent` is set. AppKit owns the
+  corners, and nothing here names a radius. `None`, the default, older macOS versions and other
+  platforms keep the window as it was. The toolbar hides before the window enters fullscreen,
+  since AppKit would otherwise show an empty toolbar window that takes the input above it, and
+  shows again after the window leaves fullscreen, before the traffic lights move. Neither happens
+  under the window state's lock, since laying out the toolbar can call back into GPUI. A failed
+  entry into fullscreen, which gets no will-exit notification, restores the transparent titlebar
+  and does what leaving fullscreen does, and a failed exit makes the titlebar opaque again.
+  Native tabs still take titlebar space, so a window that draws its own header normally sets no
+  `tabbing_identifier`. `WindowOptions::default` builds its titlebar with
+  `TitlebarOptions::default()`, and code that writes out a `TitlebarOptions` adds
+  `toolbar_style` or `..Default::default()`. `mhr-gpui-macos` asks for `objc2-app-kit`'s
+  `NSToolbar` feature. The example `window_toolbar` opens a window of each style and, with
+  `--smoke`, checks each one's toolbar, surface and hit testing through two fullscreen
+  round trips and simulated failed transitions. It comes from the GPUI Box framework's
+  commit `a8238a48`, original work under Apache-2.0, built on public `NSToolbar` and `NSWindow` APIs, as
+  [Apple's WWDC25 AppKit session](https://developer.apple.com/videos/play/wwdc2025/310/)
+  describes toolbar-dependent window corners. `mhr-gpui-apple`'s copy of `platform.rs` under
+  `vendor/gpui` follows it.
 
 ## The mobile crate
 

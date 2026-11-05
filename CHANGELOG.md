@@ -56,6 +56,9 @@ gpui no longer uses them.
 - `drag_hold`, after `on_drag`, makes a mouse drag wait for the press to be held that long, and
   grabs the element where it was pressed.
 - `Window::rendered_scene`, under `test-support`, returns the scene the window painted last.
+- `TitlebarOptions::toolbar_style` opts a macOS 26 window into native toolbar chrome, with the
+  larger system corners, through an empty `NSToolbar` in a `WindowToolbarStyle`. It is `None` by
+  default. Code that writes out a `TitlebarOptions` adds the field or `..Default::default()`.
 
 ## 0.1.9
 
