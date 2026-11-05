@@ -31,6 +31,7 @@ use crate::{
 use collections::HashMap;
 use gpui_util::ResultExt;
 use refineable::Refineable;
+use scheduler::Instant;
 use smallvec::SmallVec;
 use std::{
     any::{Any, TypeId},
@@ -657,7 +658,22 @@ impl Interactivity {
                 constructor(value.downcast_ref().unwrap(), offset, window, cx).into()
             }),
             external_payload: None,
+            hold: Duration::ZERO,
         });
+    }
+
+    /// Requires the primary button to stay pressed for `hold` before a drag registered with
+    /// [`Self::on_drag`] may begin. Movement past the drag threshold during the hold does not
+    /// start the drag, and the press still resolves as a click if released over the element.
+    /// The first movement after the hold starts the drag, and its preview keeps the press point
+    /// under the cursor rather than the point the pointer had reached. The hold is measured on
+    /// the executor clock. Must be called after [`Self::on_drag`].
+    pub fn drag_hold(&mut self, hold: Duration) {
+        let Some(drag_listener) = self.drag_listener.as_mut() else {
+            debug_assert!(false, "drag_hold must be called after on_drag");
+            return;
+        };
+        drag_listener.hold = hold;
     }
 
     /// Registers a callback resolving a payload to offer the platform if a drag started by this
@@ -1680,6 +1696,17 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Requires the primary button to stay pressed for `hold` before this element's drag may
+    /// begin. Must be called after [`Self::on_drag`].
+    /// The fluent API equivalent to [`Interactivity::drag_hold`].
+    fn drag_hold(mut self, hold: Duration) -> Self
+    where
+        Self: Sized,
+    {
+        self.interactivity().drag_hold(hold);
+        self
+    }
+
     /// Registers a callback resolving a payload to offer the platform if a drag started by this
     /// element leaves the window. It is invoked at most once per drag gesture, when the pointer
     /// exits the viewport. Must be called after [`Self::on_drag`], with the same dragged value
@@ -1815,6 +1842,7 @@ pub(crate) struct DragListener {
     value: Arc<dyn Any>,
     render: Box<dyn Fn(&dyn Any, Point<Pixels>, &mut Window, &mut App) -> AnyView + 'static>,
     external_payload: Option<ExternalDragPayloadResolver>,
+    hold: Duration,
 }
 
 type ExternalDragPayloadResolver =
@@ -3050,16 +3078,23 @@ impl Interactivity {
                     .get_or_insert_with(Default::default)
                     .clone();
 
+                let pressed_at = element_state
+                    .pressed_at
+                    .get_or_insert_with(Default::default)
+                    .clone();
+
                 window.on_mouse_event({
                     let pending_mouse_down = pending_mouse_down.clone();
+                    let pressed_at = pressed_at.clone();
                     let hitbox = hitbox.clone();
                     let has_aux_click_listeners = !aux_click_listeners.is_empty();
-                    move |event: &MouseDownEvent, phase, window, _cx| {
+                    move |event: &MouseDownEvent, phase, window, cx| {
                         if phase == DispatchPhase::Bubble
                             && (event.button == MouseButton::Left || has_aux_click_listeners)
                             && hitbox.is_hovered(window)
                         {
                             *pending_mouse_down.borrow_mut() = Some(event.clone());
+                            pressed_at.set(Some(cx.background_executor().now()));
                             window.refresh();
                         }
                     }
@@ -3077,11 +3112,27 @@ impl Interactivity {
                         if let Some(mouse_down) = pending_mouse_down.clone()
                             && !cx.has_active_drag()
                             && (event.position - mouse_down.position).magnitude() > DRAG_THRESHOLD
+                            && drag_listener.as_ref().is_some_and(|listener| {
+                                listener.hold.is_zero()
+                                    || pressed_at.get().is_some_and(|pressed_at| {
+                                        cx.background_executor()
+                                            .now()
+                                            .saturating_duration_since(pressed_at)
+                                            >= listener.hold
+                                    })
+                            })
                             && let Some(listener) = drag_listener.take()
                             && mouse_down.button == MouseButton::Left
                         {
                             *clicked_state.borrow_mut() = ElementClickedState::default();
-                            let cursor_offset = event.position - hitbox.origin;
+                            // A held drag grabs the element where it was pressed, not where the
+                            // pointer wandered during the hold.
+                            let grab_position = if listener.hold.is_zero() {
+                                event.position
+                            } else {
+                                mouse_down.position
+                            };
+                            let cursor_offset = grab_position - hitbox.origin;
                             let drag = (listener.render)(
                                 listener.value.as_ref(),
                                 cursor_offset,
@@ -3750,6 +3801,7 @@ pub struct InteractiveElementState {
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
     ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
     scroll_transition: Option<Rc<RefCell<ScrollTransition>>>,
+    pressed_at: Option<Rc<Cell<Option<Instant>>>>,
     pub(crate) active_tooltip: Option<Rc<RefCell<Option<ActiveTooltip>>>>,
     long_press_tooltip_active: Option<Rc<Cell<bool>>>,
 }
@@ -4647,6 +4699,10 @@ impl ScrollHandle {
         self.0.borrow().child_bounds.len()
     }
 }
+
+#[cfg(test)]
+#[path = "drag_hold_tests.rs"]
+mod drag_hold_tests;
 
 #[cfg(test)]
 #[path = "eased_scroll_tests.rs"]

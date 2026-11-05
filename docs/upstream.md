@@ -499,6 +499,15 @@ copy of the gpui-pre 0.3.11 crates first, and they are ported here onto the fork
   `src/elements/eased_scroll_tests.rs` cover easing, notches that add up, clamping, the animated
   scrolls and reduced motion. From GPUI Kit's vendored gpui-pre 0.3.11, which took the behavior
   from the GPUI Box framework.
+- **Drags after a held press**, in `mhr-gpui`'s `src/elements/div.rs`.
+  `Interactivity::drag_hold` and `StatefulInteractiveElement::drag_hold`, called after `on_drag`,
+  make a drag wait until the primary button has been held for a while, so that an element can be
+  flicked and clicked without dragging it. Movement during the hold doesn't start the drag, and
+  the press still clicks if it ends over the element. The first movement past the drag threshold
+  after the hold starts it, with the point that was pressed under the pointer. The hold goes by
+  the executor's clock, and touch drags stay with the long-press recognizer.
+  `src/elements/drag_hold_tests.rs` covers it. From GPUI Kit's vendored gpui-pre 0.3.11, which
+  took the behavior from the GPUI Box framework.
 
 ## The mobile crate
 

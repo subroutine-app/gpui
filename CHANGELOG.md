@@ -53,6 +53,8 @@ gpui no longer uses them.
   `UniformListScrollHandle::scroll_to_item_animated`, `ListState::scroll_by_animated` and
   `ListState::scroll_to_reveal_item_animated` scroll over 200 ms. Reduced motion moves at once.
   A test that turns a notched wheel now lets 80 ms pass before it reads the offset.
+- `drag_hold`, after `on_drag`, makes a mouse drag wait for the press to be held that long, and
+  grabs the element where it was pressed.
 
 ## 0.1.9
 
