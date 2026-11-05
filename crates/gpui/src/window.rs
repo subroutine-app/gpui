@@ -4622,6 +4622,12 @@ impl Window {
         &self.frame_time
     }
 
+    /// The scene of the frame drawn last, for tests that check what was painted.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn rendered_scene(&self) -> &Scene {
+        &self.rendered_frame.scene
+    }
+
     /// Asks for the frame that draws the next step of the animated effects the rendered frame
     /// painted with, at the next frame, or when a throttled animation is due.
     fn schedule_paint_effect_frames(&mut self, cx: &mut App) {
@@ -9517,6 +9523,36 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(observed_appearance.get(), Some(WindowAppearance::Dark));
+    }
+
+    /// A test outside the crate reads what the last frame painted through `rendered_scene`.
+    #[gpui::test]
+    fn the_rendered_scene_is_the_last_frame(cx: &mut TestAppContext) {
+        struct Swatch(crate::Hsla);
+
+        impl Render for Swatch {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size(px(10.)).bg(self.0)
+            }
+        }
+
+        let (swatch, cx) = cx.add_window_view(|_, _| Swatch(hsla(0., 1., 0.5, 1.)));
+        cx.run_until_parked();
+        let painted = |cx: &mut crate::VisualTestContext| {
+            cx.update(|window, _| {
+                let quads = &window.rendered_scene().quads;
+                assert_eq!(quads.len(), 1);
+                quads[0].background.solid
+            })
+        };
+        assert_eq!(painted(cx), hsla(0., 1., 0.5, 1.));
+
+        swatch.update(cx, |swatch, cx| {
+            swatch.0 = hsla(0.5, 1., 0.5, 1.);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(painted(cx), hsla(0.5, 1., 0.5, 1.));
     }
 
     /// Element handlers hear a modifier change along the focused path only, so

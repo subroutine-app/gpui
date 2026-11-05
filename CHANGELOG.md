@@ -55,6 +55,7 @@ gpui no longer uses them.
   A test that turns a notched wheel now lets 80 ms pass before it reads the offset.
 - `drag_hold`, after `on_drag`, makes a mouse drag wait for the press to be held that long, and
   grabs the element where it was pressed.
+- `Window::rendered_scene`, under `test-support`, returns the scene the window painted last.
 
 ## 0.1.9
 

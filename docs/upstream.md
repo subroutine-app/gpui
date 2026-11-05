@@ -508,6 +508,10 @@ copy of the gpui-pre 0.3.11 crates first, and they are ported here onto the fork
   the executor's clock, and touch drags stay with the long-press recognizer.
   `src/elements/drag_hold_tests.rs` covers it. From GPUI Kit's vendored gpui-pre 0.3.11, which
   took the behavior from the GPUI Box framework.
+- **The scene of the last frame**, in `mhr-gpui`'s `src/window.rs`. `Window::rendered_scene`,
+  under `test-support`, returns what the window painted last, so a test outside the crate can
+  check the primitives a frame drew, such as the opacity or translation of a paint effect. A test
+  in `window.rs` covers it. `mhr-gpui-apple`'s copy of `window.rs` under `vendor/gpui` follows it.
 
 ## The mobile crate
 
