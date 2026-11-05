@@ -1,9 +1,9 @@
 // Modified by Subroutine, as docs/upstream.md in subroutine-app/gpui describes.
 use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, AlignSelf, BorderStyle, CursorStyle,
-    DefiniteLength, Display, Fill, Filter, FlexDirection, FlexWrap, Font, FontFeatures, FontStyle,
-    FontWeight, GridPlacement, GridTemplate, GridTemplateMinSize, Hsla, JustifyContent, Length,
-    Pixels, SharedString, StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow,
+    DefiniteLength, Display, Edges, Fill, Filter, FlexDirection, FlexWrap, Font, FontFeatures,
+    FontStyle, FontWeight, GridPlacement, GridTemplate, GridTemplateMinSize, Hsla, JustifyContent,
+    Length, Pixels, SharedString, StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow,
     TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
 };
 pub use gpui_macros::{
@@ -56,6 +56,21 @@ pub trait Styled: Sized {
     /// convenience setters such as [`Styled::blur`].
     fn filter(mut self, filters: impl Into<Vec<Filter>>) -> Self {
         self.style().filter = Some(filters.into());
+        self
+    }
+
+    /// Fade this element's content to transparent across a band inside each edge, clipped to
+    /// its bounds — e.g. to soften where a scrolling list's content meets its viewport. Each
+    /// edge's band width is in logical pixels; a zero width leaves that edge sharp, and a single
+    /// [`Pixels`] value fades all four edges. See [`Filter::FadeEdges`].
+    ///
+    /// *Appends* to the element's filter chain. To replace the whole chain, use
+    /// [`Styled::filter`].
+    fn fade_edges(mut self, bands: impl Into<Edges<Pixels>>) -> Self {
+        self.style()
+            .filter
+            .get_or_insert_with(Vec::new)
+            .push(Filter::FadeEdges(bands.into()));
         self
     }
 

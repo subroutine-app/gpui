@@ -463,6 +463,18 @@ copy of the gpui-pre 0.3.11 crates first, and they are ported here onto the fork
   sample through a clamping sampler of their own. The tests in `filter_tests` at the end of
   `scene.rs` check the order of groups, nested groups, content after a group and backdrops.
   `mhr-gpui-apple`'s copies of `scene.rs` and `window.rs` under `vendor/gpui` follow them.
+- **Faded edges**, in `mhr-gpui`'s `src/style.rs` and `src/styled.rs` and the three renderers.
+  `Filter::FadeEdges` takes a band inside each edge, in logical pixels, and `Styled::fade_edges`
+  adds it to an element's `filter` chain. Opacity ramps from 0 at the edge to 1 at the band's inner
+  side, and bands multiply where they meet, like CSS mask gradients of each edge. It runs on the
+  content filter's group, so it fades everything the element paints, background, children and
+  border, as one layer clipped to the element's bounds and corner radii. Without a blur in the
+  chain the group is composited at full resolution, and with one the fade applies after the blur
+  whatever the order. In a `backdrop_filter` chain it softens the blurred backdrop's edges and
+  does nothing alone. The composite's uniform (`BlurUniform` in Metal, `BlurParams` in WGSL and
+  HLSL) grew from 80 to 112 bytes, with `fade` at byte 80 as a 16-byte-aligned vector, and
+  assertions hold its size and offset. `list` paints none of its own style, so an app fades a
+  wrapper around it. From GPUI Kit's vendored gpui-pre 0.3.11.
 
 ## The mobile crate
 

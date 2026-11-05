@@ -45,6 +45,8 @@ gpui no longer uses them.
   is painted behind it, like CSS `backdrop-filter`, on Metal, wgpu and DirectX.
   `Window::paint_backdrop_filter` and `Window::with_filter_layer` do the same for custom
   elements. A scene without filters renders as before.
+- `Styled::fade_edges` and `Filter::FadeEdges` fade an element to transparent across a band
+  inside each edge, such as where a scrolling list meets its viewport.
 
 ## 0.1.9
 

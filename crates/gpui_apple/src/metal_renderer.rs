@@ -71,6 +71,18 @@ impl FilterEffects {
                     blur_radius: effects.blur_radius.max(radius.0),
                     ..effects
                 },
+                ScaledFilter::FadeEdges(bands) => {
+                    let [top, right, bottom, left] = effects.fade;
+                    Self {
+                        fade: [
+                            top.max(bands.top.0),
+                            right.max(bands.right.0),
+                            bottom.max(bands.bottom.0),
+                            left.max(bands.left.0),
+                        ],
+                        ..effects
+                    }
+                }
             })
     }
 

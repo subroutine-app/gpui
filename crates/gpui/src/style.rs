@@ -407,6 +407,17 @@ impl BoxShadow {
 pub enum Filter {
     /// A gaussian blur with the given radius, in logical pixels. Maps to CSS `blur(<px>)`.
     Blur(Pixels),
+    /// Fades content to transparent across a band inside each edge, the band's width given per
+    /// edge in logical pixels; an edge with a zero width stays sharp. Opacity ramps linearly
+    /// from zero at the edge to full at the band's inner side, and the bands multiply where they
+    /// meet, like a CSS `mask-image` of linear gradients.
+    ///
+    /// As a content [`Styled::filter`], it applies to everything the element paints — background,
+    /// children of any kind (text, quads, images, surfaces), and border — composited as one
+    /// group and clipped to the element's bounds and corner radii. It behaves like a mask: within
+    /// one chain it applies after any blur, whatever the order. As a [`Styled::backdrop_filter`],
+    /// it softens the edges of the blurred backdrop and has no effect without a blur.
+    FadeEdges(Edges<Pixels>),
 }
 
 impl Filter {
@@ -419,6 +430,7 @@ impl Filter {
     pub fn is_identity(&self) -> bool {
         match self {
             Filter::Blur(radius) => *radius <= Pixels::ZERO,
+            Filter::FadeEdges(bands) => !bands.any(|band| *band > Pixels::ZERO),
         }
     }
 
@@ -427,6 +439,9 @@ impl Filter {
     pub fn scale(&self, factor: f32) -> ScaledFilter {
         match self {
             Filter::Blur(radius) => ScaledFilter::Blur(radius.scale(factor)),
+            Filter::FadeEdges(bands) => {
+                ScaledFilter::FadeEdges(bands.map(|band| (*band).max(Pixels::ZERO)).scale(factor))
+            }
         }
     }
 }
@@ -442,6 +457,8 @@ impl Filter {
 pub enum ScaledFilter {
     /// A gaussian blur with the given radius, in scaled (device) pixels.
     Blur(ScaledPixels),
+    /// Per-edge fade bands, in scaled (device) pixels; never negative. See [`Filter::FadeEdges`].
+    FadeEdges(Edges<ScaledPixels>),
 }
 
 /// How to handle whitespace in text
