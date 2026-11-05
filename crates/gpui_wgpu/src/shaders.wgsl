@@ -1,3 +1,4 @@
+// Modified by Subroutine, as docs/upstream.md in subroutine-app/gpui describes.
 /* Functions useful for debugging:
 
 // A heat map color for debugging (blue -> cyan -> green -> yellow -> red).
@@ -1359,4 +1360,156 @@ fn fs_surface(input: SurfaceVarying) -> @location(0) vec4<f32> {
         1.0);
 
     return ycbcr_to_RGB * y_cb_cr;
+}
+
+// --- blur --- //
+//
+// Backdrop and content filters share these passes:
+//   1. `fs_blur_downsample` copies a source texture into the half-resolution blur texture
+//      (also reused to blit the offscreen scene into the swapchain).
+//   2. `fs_blur` runs one axis of a separable gaussian; the host invokes it twice.
+//   3. `fs_blur_composite` samples the blurred texture and composites it into a rounded
+//      rectangle, clipped and modulated by opacity.
+//
+// Notes: the scene/blur textures use the swapchain's (typically non-sRGB)
+// format, so the gaussian runs on gamma-encoded values rather than linear light — consistent
+// with the rest of gpui's compositing and close to what browsers do; bright detail darkens
+// slightly. A content-filter group's texture is transparent outside the painted subtree, so
+// the blur bleeds toward transparent at the group's edges (a soft edge ring) before the
+// rounded-rect clip — this matches CSS `filter: blur` edge behaviour.
+
+struct BlurParams {
+    bounds: Bounds,
+    content_mask: Bounds,
+    corner_radii: vec4<f32>,
+    direction: vec2<f32>,
+    sigma: f32,
+    opacity: f32,
+    tap_count: f32,
+    // Spacing between taps, in pixels. >1 when the radius is so large the kernel would need more
+    // than `tap_count` taps to span ±3σ — the taps spread out instead of truncating the gaussian.
+    tap_step: f32,
+    // 1.0 = clip the composite to the rounded rect (backdrop); 0.0 = let the blurred result fade
+    // out on its own (content `filter` bleeds past the element box like CSS).
+    clip_rounded: f32,
+    // 1.0 = snapped 2:1 box downsample (anchor the half-res grid to a fixed 2px grid at the origin
+    // so a stationary element blurs identically at every window size); 0.0 = 1:1 copy (scene blit).
+    downsample: f32,
+    // Composite only: fade bands (top, right, bottom, left) inside `bounds`, in device pixels.
+    fade: vec4<f32>,
+    // Composite only: scene pixels per source texel (2 = half-res blur, 1 = unblurred group).
+    sample_scale: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+}
+
+// Opacity of the edge-fade mask at `p`: a linear ramp from 0 at each faded edge of `bounds` to 1
+// at the band's inner side, multiplied across edges like stacked CSS mask gradients.
+fn edge_fade(p: vec2<f32>, bounds: Bounds, fade: vec4<f32>) -> f32 {
+    let near = p - bounds.origin;
+    let far = bounds.origin + bounds.size - p;
+    let distance = vec4<f32>(near.y, far.x, far.y, near.x);
+    let ramp = select(vec4<f32>(1.0), saturate(distance / max(fade, vec4<f32>(1e-5))), fade > vec4<f32>(0.0));
+    return ramp.x * ramp.y * ramp.z * ramp.w;
+}
+
+@group(1) @binding(0) var<uniform> blur_locals: BlurParams;
+@group(1) @binding(1) var t_blur: texture_2d<f32>;
+@group(1) @binding(2) var s_blur: sampler;
+
+struct BlurVarying {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(3) clip_distances: vec4<f32>,
+}
+
+@vertex
+fn vs_blur_fullscreen(@builtin(vertex_index) vertex_id: u32) -> BlurVarying {
+    // A single triangle large enough to cover the whole framebuffer.
+    let uv = vec2<f32>(f32((vertex_id << 1u) & 2u), f32(vertex_id & 2u));
+    var out = BlurVarying();
+    out.uv = uv;
+    out.position = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+    out.clip_distances = vec4<f32>(1.0);
+    return out;
+}
+
+@fragment
+fn fs_blur_downsample(input: BlurVarying) -> @location(0) vec4<f32> {
+    if (blur_locals.downsample > 0.5) {
+        // Snapped 2:1 box downsample. Half-res texel `px` samples source at full-res coordinate
+        // 2*px + 1 (the boundary between source texels 2*px and 2*px+1), so one bilinear tap
+        // averages exactly that pair. The grid is anchored to the origin and independent of the
+        // viewport size, so an element at fixed pixels blurs identically at every window size —
+        // otherwise the implicit `floor(W/2)` grid stretches and the halo wobbles by ~1px on resize.
+        let dst = floor(input.position.xy);
+        let src_uv = (dst * 2.0 + 1.0) / globals.viewport_size;
+        return textureSampleLevel(t_blur, s_blur, src_uv, 0.0);
+    }
+    // 1:1 copy at matching resolution (used to blit the offscreen scene into the swapchain).
+    return textureSampleLevel(t_blur, s_blur, input.uv, 0.0);
+}
+
+@fragment
+fn fs_blur(input: BlurVarying) -> @location(0) vec4<f32> {
+    let sigma = blur_locals.sigma;
+    let taps = i32(blur_locals.tap_count);
+    let step = blur_locals.tap_step;
+    var color = vec4<f32>(0.0);
+    var weight_sum = 0.0;
+    for (var i = -taps; i <= taps; i = i + 1) {
+        let offset = f32(i) * step;
+        let weight = gaussian(offset, sigma);
+        let uv = input.uv + blur_locals.direction * offset;
+        color += textureSampleLevel(t_blur, s_blur, uv, 0.0) * weight;
+        weight_sum += weight;
+    }
+    return color / max(weight_sum, 1e-5);
+}
+
+@vertex
+fn vs_blur_composite(@builtin(vertex_index) vertex_id: u32) -> BlurVarying {
+    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+    var out = BlurVarying();
+    out.position = to_device_position(unit_vertex, blur_locals.bounds);
+    out.uv = unit_vertex;
+    out.clip_distances = distance_from_clip_rect(unit_vertex, blur_locals.bounds, blur_locals.content_mask);
+    return out;
+}
+
+@fragment
+fn fs_blur_composite(input: BlurVarying) -> @location(0) vec4<f32> {
+    if (any(input.clip_distances < vec4<f32>(0.0))) {
+        return vec4<f32>(0.0);
+    }
+
+    // Sample by screen position. For the half-res blur this is the SAME fixed 2:1 grid the snapped
+    // downsample wrote (anchored at the origin, independent of viewport parity): twice the half-res
+    // texture size is `2*floor(W/2)`, the source span it covers, so screen pixel p maps to half-res
+    // texel p/2 at every window size and the composite stays put rather than wobbling on resize.
+    // An unblurred group is sampled 1:1.
+    let source_span = vec2<f32>(textureDimensions(t_blur)) * blur_locals.sample_scale;
+    let uv = input.position.xy / source_span;
+    let blurred = textureSampleLevel(t_blur, s_blur, uv, 0.0);
+
+    let corner_radii = Corners(
+        blur_locals.corner_radii.x,
+        blur_locals.corner_radii.y,
+        blur_locals.corner_radii.z,
+        blur_locals.corner_radii.w,
+    );
+    // Backdrop blur and fades clip to the rounded rect (they have a defined shape). An unfaded
+    // content blur does not — it bleeds past the element box like CSS `filter: blur`, so the soft
+    // fade isn't sharply truncated at the edge; its shape comes from the blurred group's alpha.
+    let distance = quad_sdf(input.position.xy, blur_locals.bounds, corner_radii);
+    let coverage = select(1.0, saturate(0.5 - distance), blur_locals.clip_rounded > 0.5)
+        * edge_fade(input.position.xy, blur_locals.bounds, blur_locals.fade);
+
+    // The blurred sample is premultiplied (blurring against the transparent, rgb=0 surround scales
+    // rgb with the fading alpha), so output premultiplied and let the pipeline blend premultiplied.
+    // A backdrop's scene is opaque (alpha ~= 1) so this replaces; a content-filter group is
+    // transparent outside its subtree, so the target shows through there instead of darkening.
+    let c = coverage * blur_locals.opacity;
+    return vec4<f32>(blurred.rgb * c, blurred.a * c);
 }

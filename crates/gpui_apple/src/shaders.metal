@@ -1,3 +1,4 @@
+// Modified by Subroutine, as docs/upstream.md in subroutine-app/gpui describes.
 #include <metal_stdlib>
 #include <simd/simd.h>
 
@@ -1276,4 +1277,153 @@ float4 fill_color(Background background,
   }
 
   return color;
+}
+
+// --- blur --- //
+//
+// Shared by backdrop (`backdrop-filter`) and content (`filter`) blur. Three passes:
+// downsample (full -> half res), separable gaussian (run twice), and a composite that
+// samples the blurred texture into a rounded rectangle. `BlurParams` is supplied via
+// `setFragmentBytes`/`setVertexBytes` and mirrors the Rust `BlurUniform` struct exactly.
+//
+// Buffer/texture indices (raw, matching gpui_macos::metal_renderer::BlurInputIndex):
+//   buffer(0) = unit vertices, buffer(1) = BlurParams, buffer(2) = viewport size
+//   texture(0) = source
+
+struct BlurParams {
+  Bounds_ScaledPixels bounds;
+  Bounds_ScaledPixels content_mask;
+  Corners_ScaledPixels corner_radii;
+  float2 direction;
+  float sigma;
+  float opacity;
+  float tap_count;
+  float clip_rounded;
+  // 1.0 = snapped 2:1 box downsample (anchor the half-res grid to a fixed 2px grid at the origin
+  // so a stationary element blurs identically at every window size); 0.0 = 1:1 copy (scene blit).
+  float downsample;
+  // Spacing between taps in pixels (gaussian passes only); >1 lets `tap_count` taps span very
+  // large radii without truncating the gaussian.
+  float tap_step;
+  // Composite only: fade bands (top, right, bottom, left) inside `bounds`, in device pixels.
+  float4 fade;
+  // Composite only: scene pixels per source texel (2 = half-res blur, 1 = unblurred group).
+  float sample_scale;
+  float3 _pad;
+};
+
+// Opacity of the edge-fade mask at `p`: a linear ramp from 0 at each faded edge of `bounds` to 1
+// at the band's inner side, multiplied across edges like stacked CSS mask gradients.
+float edge_fade(float2 p, Bounds_ScaledPixels bounds, float4 fade) {
+  float2 near = p - float2(bounds.origin.x, bounds.origin.y);
+  float2 far = float2(bounds.origin.x + bounds.size.width,
+                      bounds.origin.y + bounds.size.height) - p;
+  float4 distance = float4(near.y, far.x, far.y, near.x);
+  float4 ramp = select(float4(1.0), saturate(distance / max(fade, 1e-5)), fade > 0.0);
+  return ramp.x * ramp.y * ramp.z * ramp.w;
+}
+
+struct BlurVertexOutput {
+  float4 position [[position]];
+  float2 uv;
+};
+
+vertex BlurVertexOutput blur_fullscreen_vertex(
+    uint unit_vertex_id [[vertex_id]],
+    constant float2 *unit_vertices [[buffer(0)]]) {
+  float2 uv = unit_vertices[unit_vertex_id];
+  BlurVertexOutput out;
+  out.position = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+  out.uv = uv;
+  return out;
+}
+
+fragment float4 blur_downsample_fragment(
+    BlurVertexOutput input [[stage_in]],
+    texture2d<float> source [[texture(0)]],
+    constant BlurParams &params [[buffer(1)]]) {
+  constexpr sampler s(mag_filter::linear, min_filter::linear);
+  if (params.downsample > 0.5) {
+    // Snapped 2:1 box downsample. Half-res texel `px` samples source at full-res coordinate
+    // 2*px + 1 (the boundary between source texels 2*px and 2*px+1), so one bilinear tap averages
+    // exactly that pair. Anchored to the origin and independent of the viewport size, so an element
+    // at fixed pixels blurs identically at every window size — otherwise the implicit floor(W/2)
+    // grid stretches and the halo wobbles by ~1px on resize. Uses the source's own dimensions
+    // because this pass binds the half-res target size as the viewport.
+    float2 dst = floor(input.position.xy);
+    float2 src_size = float2(float(source.get_width()), float(source.get_height()));
+    float2 src_uv = (dst * 2.0 + 1.0) / src_size;
+    return source.sample(s, src_uv);
+  }
+  // 1:1 copy at matching resolution (used to blit the offscreen scene into the drawable).
+  return source.sample(s, input.uv);
+}
+
+fragment float4 blur_fragment(
+    BlurVertexOutput input [[stage_in]],
+    texture2d<float> source [[texture(0)]],
+    constant BlurParams &params [[buffer(1)]]) {
+  constexpr sampler s(mag_filter::linear, min_filter::linear);
+  int taps = int(params.tap_count);
+  float4 color = float4(0.0);
+  float weight_sum = 0.0;
+  for (int i = -taps; i <= taps; i++) {
+    float offset = float(i) * params.tap_step;
+    float w = gaussian(offset, params.sigma);
+    color += source.sample(s, input.uv + params.direction * offset) * w;
+    weight_sum += w;
+  }
+  return color / max(weight_sum, 1e-5);
+}
+
+struct BlurCompositeVertexOutput {
+  float4 position [[position]];
+  float clip_distance [[clip_distance]][4];
+};
+
+struct BlurCompositeFragmentInput {
+  float4 position [[position]];
+};
+
+vertex BlurCompositeVertexOutput blur_composite_vertex(
+    uint unit_vertex_id [[vertex_id]],
+    constant float2 *unit_vertices [[buffer(0)]],
+    constant BlurParams &params [[buffer(1)]],
+    constant Size_DevicePixels *viewport_size [[buffer(2)]]) {
+  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  BlurCompositeVertexOutput out;
+  out.position = to_device_position(unit_vertex, params.bounds, viewport_size);
+  float4 clip = distance_from_clip_rect(unit_vertex, params.bounds, params.content_mask);
+  out.clip_distance[0] = clip.x;
+  out.clip_distance[1] = clip.y;
+  out.clip_distance[2] = clip.z;
+  out.clip_distance[3] = clip.w;
+  return out;
+}
+
+fragment float4 blur_composite_fragment(
+    BlurCompositeFragmentInput input [[stage_in]],
+    texture2d<float> source [[texture(0)]],
+    constant BlurParams &params [[buffer(1)]],
+    constant Size_DevicePixels *viewport_size [[buffer(2)]]) {
+  constexpr sampler s(mag_filter::linear, min_filter::linear);
+  // Sample by screen position. For the half-res blur this is the SAME fixed 2:1 grid the snapped
+  // downsample wrote (anchored at the origin, independent of viewport parity): 2 * the half-res
+  // texture size maps screen pixel p to half-res texel p/2 at every window size, so it doesn't
+  // wobble on resize. An unblurred group is sampled 1:1.
+  float2 source_size = float2(float(source.get_width()), float(source.get_height()));
+  float2 uv = input.position.xy / (params.sample_scale * source_size);
+  float4 blurred = source.sample(s, uv);
+  // Backdrops and fades clip to the rounded rect (they have a defined shape); an unfaded content
+  // blur bleeds past its bounds like CSS `filter: blur`, so its shape comes from the blurred
+  // group's own alpha.
+  float dist = quad_sdf(input.position.xy, params.bounds, params.corner_radii);
+  float coverage = params.clip_rounded > 0.5 ? saturate(0.5 - dist) : 1.0;
+  coverage *= edge_fade(input.position.xy, params.bounds, params.fade);
+  // The blurred sample is premultiplied (blurring against the transparent surround scales rgb with
+  // the fading alpha), so output premultiplied and use a premultiplied-blend pipeline. A backdrop's
+  // scene is opaque (so this replaces); a content-filter group is transparent outside its subtree
+  // (so the target shows through there instead of darkening).
+  float a = coverage * params.opacity;
+  return float4(blurred.rgb * a, blurred.a * a);
 }

@@ -1,9 +1,11 @@
+// Modified by Subroutine, as docs/upstream.md in subroutine-app/gpui describes.
 use crate::metal_atlas::MetalAtlas;
 use anyhow::{Context as _, Result};
 use block2::RcBlock;
 use gpui::{
-    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
-    PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
+    AtlasTextureId, Background, Bounds, ContentMask, Corners, DevicePixels, FilterBoundary,
+    PaintSurface, Path, Point, PrimitiveBatch, ScaledFilter, ScaledPixels, Scene, Size, point,
+    size,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use image::RgbaImage;
@@ -23,8 +25,8 @@ use objc2_metal::{
     MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLDrawable,
     MTLGPUFamily, MTLLibrary, MTLLoadAction, MTLPixelFormat, MTLPrimitiveType,
     MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
-    MTLRenderPipelineState, MTLResourceOptions, MTLStorageMode, MTLStoreAction, MTLTexture,
-    MTLTextureDescriptor, MTLTextureType, MTLTextureUsage, MTLViewport,
+    MTLRenderPipelineState, MTLResourceOptions, MTLScissorRect, MTLStorageMode, MTLStoreAction,
+    MTLTexture, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage, MTLViewport,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use objc2_metal::{MTLBlitCommandEncoder, MTLOrigin, MTLRegion, MTLSize};
@@ -46,6 +48,36 @@ const PATH_SAMPLE_COUNT: u32 = 4;
 /// Metal requires the offset a buffer is bound at to be 256-byte aligned.
 const INSTANCE_BUFFER_ALIGNMENT: usize = 256;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
+/// Content-filter nesting levels that get their own isolated group texture; deeper nests render
+/// inline. Must match the wgpu and DirectX backends so nested blur renders consistently.
+const MAX_FILTER_DEPTH: usize = 2;
+
+/// What a filter chain asks of the composite pass. Exhaustive on purpose: a new
+/// [`ScaledFilter`] variant must be handled (or deliberately ignored) by this backend.
+#[derive(Clone, Copy, Default)]
+struct FilterEffects {
+    /// The largest blur radius in the chain, in device pixels.
+    blur_radius: f32,
+    /// The widest fade band per edge, `[top, right, bottom, left]`, in device pixels.
+    fade: [f32; 4],
+}
+
+impl FilterEffects {
+    fn of(filters: &[ScaledFilter]) -> Self {
+        filters
+            .iter()
+            .fold(Self::default(), |effects, filter| match filter {
+                ScaledFilter::Blur(radius) => Self {
+                    blur_radius: effects.blur_radius.max(radius.0),
+                    ..effects
+                },
+            })
+    }
+
+    fn fades(&self) -> bool {
+        self.fade.iter().any(|band| *band > 0.0)
+    }
+}
 
 pub type Context = Arc<Mutex<InstanceBufferPool>>;
 pub type Renderer = MetalRenderer;
@@ -143,6 +175,9 @@ pub struct MetalRenderer {
     monochrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     polychrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    blur_downsample_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    blur_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    blur_composite_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     unit_vertices: Retained<ProtocolObject<dyn MTLBuffer>>,
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     sprite_atlas: Arc<MetalAtlas>,
@@ -150,10 +185,117 @@ pub struct MetalRenderer {
     path_intermediate_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     path_intermediate_msaa_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     path_sample_count: u32,
+    /// Allocated on the first frame whose scene contains a filter, so windows that never blur
+    /// pay nothing for them.
+    blur_targets: Option<BlurTargets>,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     headless_render_target: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
+}
+
+/// Render targets for filter passes. The scene renders into `scene` (the drawable is
+/// framebuffer-only and cannot be sampled), then is copied to the drawable. `ping`/`pong` are
+/// the half-resolution blur targets; `groups` holds one full-resolution target per isolated
+/// content-filter nesting level.
+#[derive(Clone)]
+struct BlurTargets {
+    size: Size<DevicePixels>,
+    scene: Retained<ProtocolObject<dyn MTLTexture>>,
+    ping: Retained<ProtocolObject<dyn MTLTexture>>,
+    pong: Retained<ProtocolObject<dyn MTLTexture>>,
+    groups: Vec<Retained<ProtocolObject<dyn MTLTexture>>>,
+}
+
+impl BlurTargets {
+    fn new(device: &ProtocolObject<dyn MTLDevice>, size: Size<DevicePixels>) -> Result<Self> {
+        let texture = |width: i32, height: i32| {
+            let descriptor = MTLTextureDescriptor::new();
+            // SAFETY: The dimensions are clamped positive and this descriptor creates a 2D texture.
+            unsafe {
+                descriptor.setWidth(width.max(1) as usize);
+                descriptor.setHeight(height.max(1) as usize);
+            }
+            descriptor.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            descriptor.setStorageMode(MTLStorageMode::Private);
+            descriptor.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+            device
+                .newTextureWithDescriptor(&descriptor)
+                .context("allocating blur render target")
+        };
+        let (width, height) = (size.width.0, size.height.0);
+        Ok(Self {
+            size,
+            scene: texture(width, height)?,
+            ping: texture(width / 2, height / 2)?,
+            pong: texture(width / 2, height / 2)?,
+            groups: (0..MAX_FILTER_DEPTH)
+                .map(|_| texture(width, height))
+                .collect::<Result<_>>()?,
+        })
+    }
+}
+
+/// Mirrors `BlurParams` in `shaders.metal`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BlurUniform {
+    bounds: Bounds<ScaledPixels>,
+    content_mask: Bounds<ScaledPixels>,
+    corner_radii: Corners<ScaledPixels>,
+    direction: [f32; 2],
+    sigma: f32,
+    opacity: f32,
+    tap_count: f32,
+    /// 1.0 clips the composite to the rounded rect (backdrops and fades); 0.0 lets content blur
+    /// bleed past its bounds like CSS `filter: blur`.
+    clip_rounded: f32,
+    /// 1.0 = snapped 2:1 box downsample; 0.0 = 1:1 copy (the scene blit).
+    downsample: f32,
+    /// Spacing between gaussian taps in pixels; >1 lets `tap_count` taps span large radii.
+    tap_step: f32,
+    /// Fade bands `[top, right, bottom, left]` inside `bounds`, in device pixels.
+    fade: [f32; 4],
+    /// Scene pixels per source texel in the composite: 2.0 for the half-resolution blur, 1.0
+    /// for an unblurred group.
+    sample_scale: f32,
+    _pad: [f32; 3],
+}
+
+impl Default for BlurUniform {
+    fn default() -> Self {
+        BlurUniform {
+            bounds: Bounds::default(),
+            content_mask: Bounds::default(),
+            corner_radii: Corners::default(),
+            direction: [0.0, 0.0],
+            sigma: 0.0,
+            opacity: 1.0,
+            tap_count: 0.0,
+            clip_rounded: 0.0,
+            downsample: 0.0,
+            tap_step: 0.0,
+            fade: [0.0; 4],
+            sample_scale: 2.0,
+            _pad: [0.0; 3],
+        }
+    }
+}
+
+// `fade` is a `float4` in `shaders.metal`, so it must start on a 16-byte boundary.
+const _: () = assert!(mem::offset_of!(BlurUniform, fade) == 80);
+const _: () = assert!(mem::size_of::<BlurUniform>() == 112);
+
+/// The region a filter pass reads and where its result lands in the target.
+struct BlurComposite {
+    bounds: Bounds<ScaledPixels>,
+    content_mask: Bounds<ScaledPixels>,
+    corner_radii: Corners<ScaledPixels>,
+    effects: FilterEffects,
+    opacity: f32,
+    /// A backdrop re-composites already-painted content inside its rounded rect, so only a blur
+    /// changes it; a content group composites its own isolated texture.
+    backdrop: bool,
 }
 
 #[repr(C)]
@@ -393,6 +535,32 @@ impl MetalRenderer {
             "surface_fragment",
             MTLPixelFormat::BGRA8Unorm,
         )?;
+        let blur_downsample_pipeline_state = build_blur_pipeline_state(
+            &device,
+            &library,
+            "blur_downsample",
+            "blur_fullscreen_vertex",
+            "blur_downsample_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        )?;
+        let blur_pipeline_state = build_blur_pipeline_state(
+            &device,
+            &library,
+            "blur",
+            "blur_fullscreen_vertex",
+            "blur_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        )?;
+        // The composite outputs a premultiplied sample; straight-alpha blending would darken
+        // the faded edges.
+        let blur_composite_pipeline_state = build_path_sprite_pipeline_state(
+            &device,
+            &library,
+            "blur_composite",
+            "blur_composite_vertex",
+            "blur_composite_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        )?;
 
         let command_queue = device.newCommandQueue().context("creating command queue")?;
         let supports_shared_storage = cfg!(target_os = "ios") || is_apple_gpu;
@@ -431,6 +599,9 @@ impl MetalRenderer {
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
+            blur_downsample_pipeline_state,
+            blur_pipeline_state,
+            blur_composite_pipeline_state,
             unit_vertices,
             instance_buffer_pool,
             sprite_atlas,
@@ -438,6 +609,7 @@ impl MetalRenderer {
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
             path_sample_count: PATH_SAMPLE_COUNT,
+            blur_targets: None,
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
         })
@@ -521,6 +693,7 @@ impl MetalRenderer {
         if size.width.0 <= 0 || size.height.0 <= 0 {
             self.path_intermediate_texture = None;
             self.path_intermediate_msaa_texture = None;
+            self.blur_targets = None;
             return Ok(());
         }
 
@@ -856,9 +1029,25 @@ impl MetalRenderer {
             .context("creating command buffer")?;
         let alpha = if self.opaque { 1. } else { 0. };
 
+        // Filters sample already-painted content, which the framebuffer-only drawable cannot
+        // provide, so a scene with filters renders offscreen and is copied out at the end.
+        let blur_targets =
+            if scene.backdrop_filters.is_empty() && scene.filter_boundaries.is_empty() {
+                None
+            } else {
+                Some(self.blur_targets(viewport_size)?)
+            };
+        let scene_target = blur_targets
+            .as_ref()
+            .map_or(texture, |targets| &*targets.scene);
+        let mut current_target = scene_target;
+        // (boundary, the target to composite back into, whether this level is isolated)
+        let mut filter_stack: Vec<(&FilterBoundary, &ProtocolObject<dyn MTLTexture>, bool)> =
+            Vec::new();
+
         let mut command_encoder = new_command_encoder_for_texture(
             &command_buffer,
-            texture,
+            current_target,
             viewport_size,
             Some(MTLClearColor {
                 red: 0.,
@@ -889,7 +1078,7 @@ impl MetalRenderer {
 
                     command_encoder = new_command_encoder_for_texture(
                         &command_buffer,
-                        texture,
+                        current_target,
                         viewport_size,
                         None,
                     )?;
@@ -939,12 +1128,312 @@ impl MetalRenderer {
                     }
                 }
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
+                PrimitiveBatch::BackdropFilters(range) => {
+                    let Some(targets) = &blur_targets else {
+                        continue;
+                    };
+                    command_encoder.endEncoding();
+                    for filter in &scene.backdrop_filters[range] {
+                        self.filter_and_composite(
+                            &command_buffer,
+                            targets,
+                            current_target,
+                            current_target,
+                            viewport_size,
+                            BlurComposite {
+                                bounds: filter.bounds,
+                                content_mask: filter.content_mask.bounds,
+                                corner_radii: filter.corner_radii,
+                                effects: FilterEffects::of(&filter.filters),
+                                opacity: filter.opacity,
+                                backdrop: true,
+                            },
+                        )?;
+                    }
+                    command_encoder = new_command_encoder_for_texture(
+                        &command_buffer,
+                        current_target,
+                        viewport_size,
+                        None,
+                    )?;
+                }
+                PrimitiveBatch::FilterBoundary(ix) => {
+                    let Some(targets) = &blur_targets else {
+                        continue;
+                    };
+                    let boundary = &scene.filter_boundaries[ix];
+                    if boundary.is_start {
+                        // Each isolated nesting level renders into its own group texture.
+                        // Beyond the pool, deeper filters render inline rather than
+                        // corrupting an outer group.
+                        let depth = filter_stack.iter().filter(|entry| entry.2).count();
+                        if let Some(group) = targets.groups.get(depth) {
+                            command_encoder.endEncoding();
+                            filter_stack.push((boundary, current_target, true));
+                            current_target = group;
+                            command_encoder = new_command_encoder_for_texture(
+                                &command_buffer,
+                                current_target,
+                                viewport_size,
+                                Some(MTLClearColor {
+                                    red: 0.,
+                                    green: 0.,
+                                    blue: 0.,
+                                    alpha: 0.,
+                                }),
+                            )?;
+                        } else {
+                            filter_stack.push((boundary, current_target, false));
+                        }
+                    } else if let Some((boundary, parent, true)) = filter_stack.pop() {
+                        command_encoder.endEncoding();
+                        self.filter_and_composite(
+                            &command_buffer,
+                            targets,
+                            current_target,
+                            parent,
+                            viewport_size,
+                            BlurComposite {
+                                bounds: boundary.bounds,
+                                content_mask: boundary.content_mask.bounds,
+                                corner_radii: boundary.corner_radii,
+                                effects: FilterEffects::of(&boundary.filters),
+                                opacity: boundary.opacity,
+                                backdrop: false,
+                            },
+                        )?;
+                        current_target = parent;
+                        command_encoder = new_command_encoder_for_texture(
+                            &command_buffer,
+                            current_target,
+                            viewport_size,
+                            None,
+                        )?;
+                    }
+                }
             }
         }
 
         command_encoder.endEncoding();
 
+        if let Some(targets) = &blur_targets {
+            self.run_blur_pass(
+                &command_buffer,
+                &self.blur_downsample_pipeline_state,
+                texture,
+                &targets.scene,
+                viewport_size,
+                None,
+                BlurUniform::default(),
+                false,
+            )?;
+        }
+
         Ok(command_buffer)
+    }
+
+    fn blur_targets(&mut self, size: Size<DevicePixels>) -> Result<BlurTargets> {
+        match &self.blur_targets {
+            Some(targets) if targets.size == size => Ok(targets.clone()),
+            _ => {
+                let targets = BlurTargets::new(&self.device, size)?;
+                self.blur_targets = Some(targets.clone());
+                Ok(targets)
+            }
+        }
+    }
+
+    /// Draw one full-target quad sampling `source` into `target` with `pipeline`. `load` keeps
+    /// the target's contents (the composite); otherwise it is cleared.
+    #[allow(clippy::too_many_arguments)]
+    fn run_blur_pass(
+        &self,
+        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+        pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+        target: &ProtocolObject<dyn MTLTexture>,
+        source: &ProtocolObject<dyn MTLTexture>,
+        target_size: Size<DevicePixels>,
+        scissor: Option<MTLScissorRect>,
+        params: BlurUniform,
+        load: bool,
+    ) -> Result<()> {
+        let clear_color = (!load).then_some(MTLClearColor {
+            red: 0.,
+            green: 0.,
+            blue: 0.,
+            alpha: 0.,
+        });
+        let encoder =
+            new_command_encoder_for_texture(command_buffer, target, target_size, clear_color)?;
+        encoder.setRenderPipelineState(pipeline);
+        if let Some(scissor) = scissor {
+            encoder.setScissorRect(scissor);
+        }
+        // SAFETY: The unit vertex buffer holds six float2 vertices. The parameter and viewport
+        // bytes are copied from live values into the slots `shaders.metal` declares for them.
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(
+                Some(&self.unit_vertices),
+                0,
+                BlurInputIndex::Vertices as usize,
+            );
+            encoder.setVertexBytes_length_atIndex(
+                ptr::NonNull::from(&params).cast(),
+                mem::size_of::<BlurUniform>(),
+                BlurInputIndex::Params as usize,
+            );
+            encoder.setVertexBytes_length_atIndex(
+                ptr::NonNull::from(&target_size).cast(),
+                mem::size_of_val(&target_size),
+                BlurInputIndex::ViewportSize as usize,
+            );
+            encoder.setFragmentBytes_length_atIndex(
+                ptr::NonNull::from(&params).cast(),
+                mem::size_of::<BlurUniform>(),
+                BlurInputIndex::Params as usize,
+            );
+            encoder.setFragmentBytes_length_atIndex(
+                ptr::NonNull::from(&target_size).cast(),
+                mem::size_of_val(&target_size),
+                BlurInputIndex::ViewportSize as usize,
+            );
+            encoder.setFragmentTexture_atIndex(Some(source), 0);
+            encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
+        }
+        encoder.endEncoding();
+        Ok(())
+    }
+
+    /// Blur `source` at half resolution and composite the result into `target`. Shared by the
+    /// backdrop and content-filter paths.
+    fn filter_and_composite(
+        &self,
+        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+        targets: &BlurTargets,
+        source: &ProtocolObject<dyn MTLTexture>,
+        target: &ProtocolObject<dyn MTLTexture>,
+        viewport_size: Size<DevicePixels>,
+        composite: BlurComposite,
+    ) -> Result<()> {
+        let FilterEffects { blur_radius, fade } = composite.effects;
+        let fades = composite.effects.fades();
+        // A fade masks to the element's box; an unfaded content blur bleeds ~3·radius past it,
+        // so its composite covers a dilated rect.
+        let clip_rounded = composite.backdrop || fades;
+        let composite_bounds = if clip_rounded {
+            composite.bounds
+        } else {
+            composite.bounds.dilate(ScaledPixels(3.0 * blur_radius))
+        };
+
+        let (sampled, sample_scale) = if blur_radius > 0.0 {
+            let region = composite_bounds.intersect(&composite.content_mask);
+            if !self.blur_to_half_resolution(
+                command_buffer,
+                targets,
+                source,
+                viewport_size,
+                region,
+                blur_radius,
+            )? {
+                return Ok(());
+            }
+            (&*targets.ping, 2.0)
+        } else if fades && !composite.backdrop {
+            (source, 1.0)
+        } else {
+            return Ok(());
+        };
+
+        self.run_blur_pass(
+            command_buffer,
+            &self.blur_composite_pipeline_state,
+            target,
+            sampled,
+            viewport_size,
+            None,
+            BlurUniform {
+                bounds: composite_bounds,
+                content_mask: composite.content_mask,
+                corner_radii: composite.corner_radii,
+                opacity: composite.opacity,
+                clip_rounded: if clip_rounded { 1.0 } else { 0.0 },
+                fade,
+                sample_scale,
+                ..Default::default()
+            },
+            true,
+        )
+    }
+
+    /// Blur the part of `source` that `region` reads into `targets.ping` at half resolution.
+    /// Returns `false` when the region is off-screen and nothing was drawn.
+    fn blur_to_half_resolution(
+        &self,
+        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+        targets: &BlurTargets,
+        source: &ProtocolObject<dyn MTLTexture>,
+        viewport_size: Size<DevicePixels>,
+        region: Bounds<ScaledPixels>,
+        radius: f32,
+    ) -> Result<bool> {
+        // Sigma is halved because the blur runs at half resolution.
+        let sigma = radius * 0.5;
+        // Span ±3σ; past 32 taps, spread the taps apart rather than truncating the kernel.
+        let ideal_taps = (3.0 * sigma).ceil();
+        let tap_count = ideal_taps.clamp(1.0, 32.0);
+        let tap_step = (ideal_taps / tap_count).max(1.0);
+        let half = size(
+            DevicePixels((viewport_size.width.0 / 2).max(1)),
+            DevicePixels((viewport_size.height.0 / 2).max(1)),
+        );
+        let Some(scissor) = half_res_scissor(region, tap_count * tap_step + 2.0, half) else {
+            return Ok(false);
+        };
+
+        self.run_blur_pass(
+            command_buffer,
+            &self.blur_downsample_pipeline_state,
+            &targets.ping,
+            source,
+            half,
+            Some(scissor),
+            BlurUniform {
+                downsample: 1.0,
+                ..Default::default()
+            },
+            false,
+        )?;
+        for (direction, from, to) in [
+            (
+                [1.0 / half.width.0 as f32, 0.0],
+                &targets.ping,
+                &targets.pong,
+            ),
+            (
+                [0.0, 1.0 / half.height.0 as f32],
+                &targets.pong,
+                &targets.ping,
+            ),
+        ] {
+            self.run_blur_pass(
+                command_buffer,
+                &self.blur_pipeline_state,
+                to,
+                from,
+                half,
+                Some(scissor),
+                BlurUniform {
+                    direction,
+                    sigma,
+                    tap_count,
+                    tap_step,
+                    ..Default::default()
+                },
+                false,
+            )?;
+        }
+        Ok(true)
     }
 
     fn draw_paths_to_intermediate(
@@ -1620,6 +2109,36 @@ fn build_path_sprite_pipeline_state(
         .with_context(|| format!("creating {label} render pipeline"))
 }
 
+/// Downsample, gaussian, and blit passes overwrite their target, so blending is disabled.
+fn build_blur_pipeline_state(
+    device: &ProtocolObject<dyn MTLDevice>,
+    library: &ProtocolObject<dyn MTLLibrary>,
+    label: &str,
+    vertex_fn_name: &str,
+    fragment_fn_name: &str,
+    pixel_format: MTLPixelFormat,
+) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>> {
+    let vertex_fn = library
+        .newFunctionWithName(&NSString::from_str(vertex_fn_name))
+        .with_context(|| format!("locating vertex function {vertex_fn_name}"))?;
+    let fragment_fn = library
+        .newFunctionWithName(&NSString::from_str(fragment_fn_name))
+        .with_context(|| format!("locating fragment function {fragment_fn_name}"))?;
+
+    let descriptor = MTLRenderPipelineDescriptor::new();
+    descriptor.setLabel(Some(&NSString::from_str(label)));
+    descriptor.setVertexFunction(Some(vertex_fn.as_ref()));
+    descriptor.setFragmentFunction(Some(fragment_fn.as_ref()));
+    // SAFETY: Index zero is within the pipeline's color attachment array.
+    let color_attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+    color_attachment.setPixelFormat(pixel_format);
+    color_attachment.setBlendingEnabled(false);
+
+    device
+        .newRenderPipelineStateWithDescriptor_error(&descriptor)
+        .with_context(|| format!("creating {label} render pipeline"))
+}
+
 fn build_path_rasterization_pipeline_state(
     device: &ProtocolObject<dyn MTLDevice>,
     library: &ProtocolObject<dyn MTLLibrary>,
@@ -1854,6 +2373,45 @@ enum SpriteInputIndex {
     ViewportSize = 2,
     AtlasTextureSize = 3,
     AtlasTexture = 4,
+}
+
+#[repr(C)]
+enum BlurInputIndex {
+    Vertices = 0,
+    Params = 1,
+    ViewportSize = 2,
+}
+
+/// The half-resolution pixel rect covering `region` (in full-resolution scene pixels) dilated
+/// by `kernel_extent` half-res pixels, so blur taps near the region's edge read real samples.
+fn half_res_scissor(
+    region: Bounds<ScaledPixels>,
+    kernel_extent: f32,
+    half: Size<DevicePixels>,
+) -> Option<MTLScissorRect> {
+    let clamp = |value: f32, max: i32| (value.max(0.0) as usize).min(max as usize);
+    let left = clamp(
+        (region.origin.x.0 / 2.0 - kernel_extent).floor(),
+        half.width.0,
+    );
+    let top = clamp(
+        (region.origin.y.0 / 2.0 - kernel_extent).floor(),
+        half.height.0,
+    );
+    let right = clamp(
+        (region.bottom_right().x.0 / 2.0 + kernel_extent).ceil(),
+        half.width.0,
+    );
+    let bottom = clamp(
+        (region.bottom_right().y.0 / 2.0 + kernel_extent).ceil(),
+        half.height.0,
+    );
+    (right > left && bottom > top).then(|| MTLScissorRect {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+    })
 }
 
 #[repr(C)]

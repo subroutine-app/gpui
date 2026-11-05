@@ -437,6 +437,30 @@ copy of the gpui-pre 0.3.11 crates first, and they are ported here onto the fork
   `Deserialize` and `JsonSchema`, as its refinement already did, so a type that holds edges, such
   as a filter's fade bands, can derive them too. `mhr-gpui-apple`'s copy of `geometry.rs` under
   `vendor/gpui` follows it.
+- **Filters in the scene**, in `mhr-gpui`'s `src/style.rs`, `src/styled.rs`, `src/scene.rs`,
+  `src/bounds_tree.rs` and `src/window.rs`, and the renderers of `mhr-gpui-apple`
+  (`src/metal_renderer.rs`, `src/shaders.metal`), `mhr-gpui-wgpu` (`src/wgpu_renderer.rs`,
+  `src/shaders.wgsl`) and `mhr-gpui-windows` (`src/directx_renderer.rs`, `src/shaders.hlsl`,
+  `build.rs`). GPUI had no blur. `Filter::Blur` and its device-space form `ScaledFilter` go in
+  `Style::filter`, like CSS `filter`, and `Style::backdrop_filter`, like CSS `backdrop-filter`,
+  through `Styled::blur`, `Styled::filter`, `Styled::backdrop_blur` and
+  `Styled::backdrop_filter`. `Window::paint_backdrop_filter` inserts a `BackdropFilter`, which
+  blurs what is already painted behind its rounded rectangle, after the drop shadows and before
+  the background, so a translucent background tints it. `Window::with_filter_layer` brackets
+  what an element paints with a pair of `FilterBoundary` markers, and the renderer draws that
+  span into a texture of its own, blurs it and composites it back. A marker takes an order above
+  everything painted before it, and the end raises the scene's order floor, so content painted
+  after a group can't sort into it. Deferred draws raise the floor too, so an overlay blurs the
+  whole scene under it. Blur passes run at half resolution with a scissor around the filtered
+  region, in targets made on the first frame that has a filter, and two levels of nested groups
+  get textures of their own. A scene without filters renders as before. A paint effect fades a
+  backdrop and moves both kinds, and a group's composite keeps its opacity, since its content
+  fades primitive by primitive. The primitive comes from the
+  gpui-ce fork's commit `69d467e4d1` ("Filter API + Blur (#40)"), Apache-2.0, as GPUI Kit adapted it to gpui-pre 0.3.11. `BlurParams` sits at constant
+  buffer `b2` in DirectX, since `b1` holds the per-frame `BatchParams`, and blur passes there
+  sample through a clamping sampler of their own. The tests in `filter_tests` at the end of
+  `scene.rs` check the order of groups, nested groups, content after a group and backdrops.
+  `mhr-gpui-apple`'s copies of `scene.rs` and `window.rs` under `vendor/gpui` follow them.
 
 ## The mobile crate
 

@@ -1,3 +1,4 @@
+// Modified by Subroutine, as docs/upstream.md in subroutine-app/gpui describes.
 #![allow(clippy::disallowed_methods, reason = "build scripts are exempt")]
 
 fn main() {
@@ -40,6 +41,9 @@ mod shader_compilation {
             "monochrome_sprite",
             "subpixel_sprite",
             "polychrome_sprite",
+            "blur_downsample",
+            "blur",
+            "blur_composite",
         ];
 
         let rust_binding_path = format!("{}/shaders_bytes.rs", out_dir);

@@ -40,6 +40,11 @@ gpui no longer uses them.
 ### From Subroutine's fork
 
 - `Edges` serializes, deserializes and has a JSON schema, like its refinement.
+- Elements blur. `Styled::blur` and `Styled::filter` blur an element and what it holds as one
+  layer, like CSS `filter`, and `Styled::backdrop_blur` and `Styled::backdrop_filter` blur what
+  is painted behind it, like CSS `backdrop-filter`, on Metal, wgpu and DirectX.
+  `Window::paint_backdrop_filter` and `Window::with_filter_layer` do the same for custom
+  elements. A scene without filters renders as before.
 
 ## 0.1.9
 
