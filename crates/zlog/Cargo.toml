@@ -1,16 +1,16 @@
 [package]
 name = "gpui-pre-zlog"
-version = "0.3.8"
+version = "0.3.11"
 edition = { workspace = true }
 publish = true
 license = "Apache-2.0"
-description = "Zed's `zlog` crate (gpui-pre snapshot of zed@279fe07)"
+description = "Zed's `zlog` crate (gpui-pre snapshot of zed@f816e1f)"
 repository = "https://github.com/zed-industries/zed"
 
 [package.metadata.gpui-pre]
 zed-crate = "zlog"
 zed-version = "0.1.0"
-zed-rev = "279fe070bb389b79652e52065b2f001edcc0b11b"
+zed-rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038"
 
 [lib]
 path = "src/zlog.rs"
@@ -22,8 +22,8 @@ default = []
 
 [dependencies]
 collections = { workspace = true }
-chrono = { workspace = true }
-log = { workspace = true }
+chrono = { workspace = true, default-features = true }
+log = { workspace = true, features = ["kv_unstable_std"] }
 anyhow = { workspace = true }
 
 [lints]
