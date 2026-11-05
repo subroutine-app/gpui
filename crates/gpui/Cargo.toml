@@ -128,10 +128,13 @@ heapless = { workspace = true }
 
 [dev-dependencies]
 env_logger = { workspace = true }
+futures-concurrency = { workspace = true }
 http_client = { workspace = true, features = ["test-support"] }
 lyon = { version = "1.0", features = ["extra"] }
+postage = { workspace = true, features = ["blocking"] }
 proptest = { workspace = true }
 unicode-segmentation = { workspace = true }
+web-time = { workspace = true }
 # Without a version, the published crate leaves these out, so they need no release of mhr-gpui.
 gpui_platform = { path = "../gpui_platform", package = "mhr-gpui-platform", default-features = false, features = ["font-kit", "wayland", "x11"] }
 reqwest_client = { path = "../reqwest_client", package = "mhr-reqwest-client" }

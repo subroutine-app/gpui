@@ -90,3 +90,7 @@ required-features = ["bench-support"]
 name = "randomized_element_tree"
 harness = false
 required-features = ["bench-support"]
+
+# The tests on macOS use `VisualTestAppContext`.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

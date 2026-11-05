@@ -363,9 +363,11 @@ adds the same line.
   The mapping happens in `KeyBinding::load`, so a binding keeps the keys it was loaded with after a
   layout change, and an app loads its keymap again from `App::on_keyboard_layout_change`.
 - **Tests and examples that build**, in the `Cargo.toml` of `mhr-gpui`, `mhr-gpui-wgpu`,
-  `mhr-gpui-web`, `mhr-gpui-macos`, `mhr-gpui-apple`, `mhr-gpui-macros`, `mhr-sum-tree` and
-  `mhr-zlog`. The release tooling leaves out `[dev-dependencies]`, so these crates' tests didn't
-  build. Each crate has the dev-dependencies its tests use again, as in Zed. Since 0.3.11 the
+  `mhr-gpui-web`, `mhr-gpui-macos`, `mhr-gpui-apple`, `mhr-gpui-platform`, `mhr-gpui-macros`,
+  `mhr-sum-tree` and `mhr-zlog`. The release tooling leaves out `[dev-dependencies]`, so these
+  crates' tests didn't build. Each crate has the dev-dependencies its tests use again, as in Zed,
+  so each crate's tests build on their own too. Since 0.3.11 `mhr-gpui`'s tests need
+  `futures-concurrency`, `postage` and `web-time`, which `test-support` makes optional. Since 0.3.11 the
   release has no `util_macros`, so the three tests in `mhr-gpui`'s `src/style.rs` that Zed marks
   `#[perf]` are plain `#[test]`s, which is what `#[perf]` runs them as outside Zed's benchmarks.
   `mhr-gpui-macros` takes `gpui` by path without a version, so its published manifest leaves it
