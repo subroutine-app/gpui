@@ -1,3 +1,4 @@
+// Modified by Mesa Hills Research, as docs/upstream.md in mesa-hills-research/gpui describes.
 //! Developer tooling for inspecting the accessibility tree.
 //!
 //! [`A11yDebug`] retains the last [`TreeUpdate`] sent to the platform adapter so

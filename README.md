@@ -8,14 +8,14 @@ builds on it. The crates are on crates.io as [`mhr-gpui`](https://crates.io/crat
 its siblings, and [CHANGELOG.md](CHANGELOG.md) lists what each release changes.
 
 It follows the `gpui-pre` crates that GPUI Kit publishes, which are snapshots of Zed's gpui cut by
-GPUI Kit's release tooling. Today that is **gpui-pre 0.3.8**, from Zed
-[`279fe070`](https://github.com/zed-industries/zed/commit/279fe070bb389b79652e52065b2f001edcc0b11b)
-(2026-10-04), the snapshot GPUI Kit 0.7.1 is built against.
+GPUI Kit's release tooling. Today that is **gpui-pre 0.3.11**, from Zed
+[`f816e1f9`](https://github.com/zed-industries/zed/commit/f816e1f9263e3a8ef63c4baaa02e1441ce1c6038)
+(2026-11-01), the snapshot GPUI Kit 0.9.0 is built against.
 
 | Crates | Source | State |
 |---|---|---|
-| `mhr-gpui` and 24 sibling crates (`crates/`, `tooling/perf`) | gpui-pre 0.3.8 | Published. Unchanged apart from their names and [a few changes](docs/upstream.md#changes-to-the-gpui-crates), such as a fix for variable font weights on Linux and Android, recent files in Windows jump lists, throttled animations that share frames, list scrollbars that hold steady over rows not drawn yet, cached views that stay cached inside other cached views and keep their accessibility nodes, paint animations that don't redraw the view they are in, long lines shaped in cached segments on Linux and Android, key bindings with Shift on a symbol key that match on every platform, and test support for screenshot tests |
-| `mhr-gpui-mobile` (`crates/gpui_mobile`) | [longbridge/gpui-mobile](https://github.com/longbridge/gpui-mobile) `9075e3a`, moved from gpui-pre 0.3.7 to 0.3.8 | Experimental and unpublished, see [Mobile](#mobile) |
+| `mhr-gpui` and 23 sibling crates (`crates/`) | gpui-pre 0.3.11 | Published. Unchanged apart from their names and [a few changes](docs/upstream.md#changes-to-the-gpui-crates), such as a fix for variable font weights on Linux and Android, recent files in Windows jump lists, throttled animations that share frames, list scrollbars that hold steady over rows not drawn yet, cached views that stay cached inside other cached views and keep their accessibility nodes, paint animations that don't redraw the view they are in, long lines shaped in cached segments on Linux and Android, key bindings with Shift on a symbol key that match on every platform, and test support for screenshot tests |
+| `mhr-gpui-mobile` (`crates/gpui_mobile`) | [longbridge/gpui-mobile](https://github.com/longbridge/gpui-mobile) `9075e3a`, moved from gpui-pre 0.3.7 to 0.3.11 | Experimental and unpublished, see [Mobile](#mobile) |
 | `mhr-gpui-screenshot` (`crates/gpui_screenshot`) | This fork | Published. Golden-image tests for GPUI views, see [Screenshot tests](#screenshot-tests) |
 | `mhr-gpui-scroll-harness` (`crates/gpui_scroll_harness`) | This fork | Measures and films how smoothly a list's scrollbar moves, unpublished, see its [README](crates/gpui_scroll_harness/README.md) |
 
@@ -26,8 +26,8 @@ imports `gpui` and `gpui_platform` as usual:
 
 ```toml
 [dependencies]
-gpui = { package = "mhr-gpui", version = "0.1" }
-gpui_platform = { package = "mhr-gpui-platform", version = "0.1", features = ["font-kit", "wayland", "x11"] }
+gpui = { package = "mhr-gpui", version = "0.2" }
+gpui_platform = { package = "mhr-gpui-platform", version = "0.2", features = ["font-kit", "wayland", "x11"] }
 ```
 
 ```rust

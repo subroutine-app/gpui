@@ -750,7 +750,7 @@ impl IosWindow {
                 flags: wgpu::InstanceFlags::default(),
                 backend_options: wgpu::BackendOptions::default(),
                 memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-                // wgpu 29 uses the instance display when the renderer creates
+                // wgpu 30 uses the instance display when the renderer creates
                 // a surface without an explicit raw display handle.
                 display: Some(Box::new(raw_window)),
             });
@@ -768,7 +768,7 @@ impl IosWindow {
 
             let surface_result = metal_instance.create_surface_unsafe(target);
             match surface_result {
-                Ok(surface) => match WgpuContext::new(metal_instance, &surface, None) {
+                Ok(surface) => match WgpuContext::new(metal_instance, &surface, &config, None) {
                     Ok(context) => {
                         // Pre-populate gpu_context so WgpuRenderer::new()
                         // reuses our Metal-backed context (and its instance)
@@ -1558,6 +1558,9 @@ impl PlatformWindow for IosWindow {
     fn on_close(&self, callback: Box<dyn FnOnce()>) {
         *self.close_callback.borrow_mut() = Some(callback);
     }
+
+    // A window on iOS stays on its screen.
+    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {}
 
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
         *self.appearance_changed_callback.borrow_mut() = Some(callback);

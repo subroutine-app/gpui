@@ -84,7 +84,7 @@ block2              = "0.6"
 
 # wgpu renderer (Metal backend on iOS/Android)
 gpui_wgpu = { workspace = true, features = ["font-kit"] }
-wgpu = "29.0.4"
+wgpu = "30.0.1"
 
 # Text / font stack
 pathfinder_geometry = "0.5"

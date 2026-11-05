@@ -5,6 +5,38 @@ version, and a requirement such as `version = "0.1"` picks up the newest 0.1.x o
 [docs/upstream.md](docs/upstream.md#changes-to-the-gpui-crates) describes each change in more
 detail.
 
+## 0.2.0
+
+Brings in gpui-pre 0.3.11, from Zed `f816e1f9` (2026-11-01), the snapshot GPUI Kit 0.9.0 is built
+against. Published as all 25 crates, which start the 0.2 line together, so a requirement such as
+`version = "0.1"` stays on 0.1.x and an app moves to `version = "0.2"`. `mhr-gpui-ios`, the iOS
+platform that gpui-pre 0.3.11 adds, is new. `mhr-perf` and `mhr-util-macros` end at 0.1.0, since
+gpui no longer uses them.
+
+### Upstream
+
+- Everything gpui-pre 0.3.11 changes since 0.3.8. Among what an app may meet:
+  `ScrollWheelEvent` is `ScrollEvent` and `on_scroll_wheel` is `on_scroll`, with the old names
+  kept as deprecated aliases. `Keystroke::parse` and `KeyBinding::new` take a `&'static str`, and
+  a keystroke made at run time goes through `Keystroke::parse_with_os` or `KeyBinding::load`.
+  `Keystroke::unparse` takes the `OperatingSystem` whose modifier names it writes. The macOS text
+  system is `gpui_apple::AppleTextSystem`. A list can hold measurements as provisional with
+  `ListState::set_item_measurement_readiness`, and a cached view redraws when the opacity it
+  paints under changes.
+- The crates need Rust 1.98, which their `rust-version` says, since upstream uses
+  `Option::map_or_default`.
+- The fork's changes carry over. List scrollbars, height estimates and cached views of measured
+  height work with upstream's new scroll anchor, provisional measurements and opacity in the
+  cache key. Animations keep going by the frame's time where upstream reads the executor's clock
+  as each element lays out.
+- Linux builds use oo7 0.6 from crates.io, as the published crates do, where Zed names a git
+  revision.
+
+### Test support
+
+- `gpui_macos::MacTextSystem`, which `mhr-gpui-macos` exported under `test-support`, is gone.
+  Tests use `gpui_apple::AppleTextSystem` with `mhr-gpui-apple`'s `font-kit` feature.
+
 ## 0.1.9
 
 Published as `mhr-gpui`, `mhr-gpui-wgpu`, `mhr-gpui-linux`, `mhr-gpui-windows`,

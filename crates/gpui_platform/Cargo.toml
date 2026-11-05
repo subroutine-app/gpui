@@ -1,6 +1,6 @@
 [package]
 name = "mhr-gpui-platform"
-version = "0.1.9"
+version = "0.2.0"
 edition = { workspace = true }
 publish = true
 license = "Apache-2.0"
@@ -14,7 +14,7 @@ categories = ["gui"]
 [package.metadata.gpui-pre]
 zed-crate = "gpui_platform"
 zed-version = "0.1.0"
-zed-rev = "279fe070bb389b79652e52065b2f001edcc0b11b"
+zed-rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038"
 
 [lib]
 path = "src/gpui_platform.rs"
@@ -22,7 +22,8 @@ doctest = false
 name = "gpui_platform"
 
 [features]
-default = []
+default = ["multithreaded"]
+multithreaded = ["gpui_web/multithreaded"]
 bench-support = ["gpui/bench-support", "gpui_macos/bench-support", "gpui_wgpu/bench-support"]
 font-kit = ["gpui_macos/font-kit"]
 inspector = ["gpui/inspector"]
@@ -38,7 +39,7 @@ screen-capture = [
     "gpui_windows/screen-capture",
     "gpui_linux/screen-capture",
 ]
-runtime_shaders = ["gpui_macos/runtime_shaders"]
+runtime_shaders = ["gpui_macos/runtime_shaders", "gpui_ios/runtime_shaders"]
 wayland = ["gpui_linux/wayland"]
 x11 = ["gpui_linux/x11"]
 
@@ -49,11 +50,14 @@ gpui = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_macos = { workspace = true }
 
+[target.'cfg(target_os = "ios")'.dependencies]
+gpui_ios = { workspace = true }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 gpui_windows = { workspace = true }
 gpui = { workspace = true, features = ["windows-manifest"] }
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+[target.'cfg(all(any(target_os = "linux", target_os = "freebsd"), not(target_env = "ohos")))'.dependencies]
 gpui_linux = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -65,6 +69,17 @@ console_error_panic_hook = { workspace = true }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "atlas_upload"
+harness = false
+required-features = ["bench-support"]
+
+[[bench]]
+name = "focus_cleanup"
+path = "../gpui/benches/focus_cleanup.rs"
+harness = false
+required-features = ["bench-support"]
 
 [[bench]]
 name = "inspector_render"

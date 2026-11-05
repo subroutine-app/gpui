@@ -5,10 +5,10 @@ named after the library imports as usual:
 
 ```toml
 [dependencies]
-gpui = { package = "mhr-gpui", version = "0.1" }
-gpui_platform = { package = "mhr-gpui-platform", version = "0.1", features = ["font-kit", "wayland", "x11"] }
+gpui = { package = "mhr-gpui", version = "0.2" }
+gpui_platform = { package = "mhr-gpui-platform", version = "0.2", features = ["font-kit", "wayland", "x11"] }
 # For HTTP, through `App::set_http_client`
-reqwest_client = { package = "mhr-reqwest-client", version = "0.1" }
+reqwest_client = { package = "mhr-reqwest-client", version = "0.2" }
 ```
 
 The crates of one release pin each other exactly, so an app always gets one consistent set.
@@ -18,8 +18,8 @@ Windows and the web need no features.
 ## Moving from gpui-pre
 
 Swap each `gpui-pre` crate for its `mhr-` package and keep the dependency's name, for example
-`gpui = { package = "gpui-pre", version = "=0.3.8" }` becomes
-`gpui = { package = "mhr-gpui", version = "0.1" }`. Code needs no changes.
+`gpui = { package = "gpui-pre", version = "=0.3.11" }` becomes
+`gpui = { package = "mhr-gpui", version = "0.2" }`. Code needs no changes.
 
 An app can't use both sets, since each has its own `gpui` types. Every `gpui-pre` crate leaves the
 app's `Cargo.lock`, including those that other dependencies bring in, such as GPUI Kit from
@@ -36,10 +36,10 @@ build of reqwest, stays, since `mhr-reqwest-client` uses it too.
 | `mhr-derive-refineable` | `gpui-pre-derive-refineable` | `crates/refineable/derive_refineable` |
 | `mhr-http-client` | `gpui-pre-http-client` | `crates/http_client` |
 | `mhr-http-client-tls` | `gpui-pre-http-client-tls` | `crates/http_client_tls` |
+| `mhr-gpui-ios` | `gpui-pre-ios` | `crates/gpui_ios` |
 | `mhr-gpui-linux` | `gpui-pre-linux` | `crates/gpui_linux` |
 | `mhr-gpui-macos` | `gpui-pre-macos` | `crates/gpui_macos` |
 | `mhr-gpui-macros` | `gpui-pre-macros` | `crates/gpui_macros` |
-| `mhr-perf` | `gpui-pre-perf` | `tooling/perf` |
 | `mhr-gpui-platform` | `gpui-pre-platform` | `crates/gpui_platform` |
 | `mhr-refineable` | `gpui-pre-refineable` | `crates/refineable` |
 | `mhr-reqwest-client` | `gpui-pre-reqwest-client` | `crates/reqwest_client` |
@@ -47,7 +47,6 @@ build of reqwest, stays, since `mhr-reqwest-client` uses it too.
 | `mhr-gpui-shared-string` | `gpui-pre-shared-string` | `crates/gpui_shared_string` |
 | `mhr-sum-tree` | `gpui-pre-sum-tree` | `crates/sum_tree` |
 | `mhr-gpui-util` | `gpui-pre-util` | `crates/gpui_util` |
-| `mhr-util-macros` | `gpui-pre-util-macros` | `crates/util_macros` |
 | `mhr-gpui-web` | `gpui-pre-web` | `crates/gpui_web` |
 | `mhr-gpui-wgpu` | `gpui-pre-wgpu` | `crates/gpui_wgpu` |
 | `mhr-gpui-windows` | `gpui-pre-windows` | `crates/gpui_windows` |

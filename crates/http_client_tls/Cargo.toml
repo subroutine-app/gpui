@@ -1,6 +1,6 @@
 [package]
 name = "mhr-http-client-tls"
-version = "0.1.0"
+version = "0.2.0"
 edition = { workspace = true }
 publish = true
 license = "Apache-2.0"
@@ -14,7 +14,7 @@ categories = ["web-programming::http-client", "cryptography"]
 [package.metadata.gpui-pre]
 zed-crate = "http_client_tls"
 zed-version = "0.1.0"
-zed-rev = "279fe070bb389b79652e52065b2f001edcc0b11b"
+zed-rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038"
 
 [lib]
 path = "src/http_client_tls.rs"
@@ -26,7 +26,7 @@ name = "http_client_tls"
 test-support = []
 
 [dependencies]
-log = { workspace = true }
+log = { workspace = true, features = ["serde"] }
 rustls = { workspace = true }
 rustls-platform-verifier = { workspace = true }
 webpki-roots = { workspace = true }

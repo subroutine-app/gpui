@@ -7,7 +7,7 @@ It's part of [mhr-gpui](https://crates.io/crates/mhr-gpui), Mesa Hills Research'
 
 ```toml
 [dependencies]
-reqwest_client = { package = "mhr-reqwest-client", version = "0.1" }
+reqwest_client = { package = "mhr-reqwest-client", version = "0.2" }
 ```
 
 The source is in [mesa-hills-research/gpui](https://github.com/mesa-hills-research/gpui). Apache-2.0, like Zed's gpui.

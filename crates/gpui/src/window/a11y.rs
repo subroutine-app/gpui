@@ -1,3 +1,4 @@
+// Modified by Mesa Hills Research, as docs/upstream.md in mesa-hills-research/gpui describes.
 //! Accessibility support, provided by [AccessKit][accesskit].
 //!
 //! There are user-facing guide-level docs [here](crate::_accessibility).

@@ -19,12 +19,12 @@ Android was validated for one AI chat screen.
 
 ## Status
 
-On gpui-pre 0.3.8:
+On gpui-pre 0.3.11:
 
 - `cargo check -p mhr-gpui-mobile --all-targets --target <target>` passes for
   `aarch64-linux-android`, `x86_64-linux-android`, `aarch64-apple-ios` and
-  `aarch64-apple-ios-sim`. The unit tests pass on Linux. Two doctests are snippets without imports
-  and fail to compile, as upstream's do.
+  `aarch64-apple-ios-sim`, checked on macOS. The unit tests passed on Linux on 0.3.8. Two
+  doctests are snippets without imports and fail to compile, as upstream's do.
 - Up to commit `f98b12a`, the example app's `.so` built and linked with NDK r29 for both
   Android targets. It builds again once GPUI Kit builds on the `mhr-` crates (see below).
 - On Linux the example fails to type-check for iOS: `ring` and `aws-lc-sys` compile C with the iOS

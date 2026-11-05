@@ -1,6 +1,6 @@
 [package]
 name = "mhr-zlog"
-version = "0.1.0"
+version = "0.2.0"
 edition = { workspace = true }
 publish = true
 license = "Apache-2.0"
@@ -14,7 +14,7 @@ categories = ["development-tools::debugging"]
 [package.metadata.gpui-pre]
 zed-crate = "zlog"
 zed-version = "0.1.0"
-zed-rev = "279fe070bb389b79652e52065b2f001edcc0b11b"
+zed-rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038"
 
 [lib]
 path = "src/zlog.rs"
@@ -26,8 +26,8 @@ default = []
 
 [dependencies]
 collections = { workspace = true }
-chrono = { workspace = true }
-log = { workspace = true }
+chrono = { workspace = true, default-features = true }
+log = { workspace = true, features = ["kv_unstable_std"] }
 anyhow = { workspace = true }
 
 [lints]

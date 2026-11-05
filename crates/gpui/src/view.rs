@@ -24,6 +24,7 @@ use std::{
 pub struct AnyView {
     entity: AnyEntity,
     render: fn(&AnyView, &mut Window, &mut App) -> AnyElement,
+    view_type_name: &'static str,
 }
 
 impl<V: Render> From<Entity<V>> for AnyView {
@@ -31,6 +32,7 @@ impl<V: Render> From<Entity<V>> for AnyView {
         AnyView {
             entity: value.into_any(),
             render: any_view::render::<V>,
+            view_type_name: type_name::<V>(),
         }
     }
 }
@@ -43,7 +45,7 @@ impl AnyView {
     /// (or [Window::refresh] is called, which ignores caching). That holds
     /// inside another cached view too, when the outer view redraws.
     pub fn cached(self, style: StyleRefinement) -> ViewElement<AnyView> {
-        ViewElement::new(self).cached(style)
+        self.into_element().cached(style)
     }
 
     /// Embed this view as a cached [`ViewElement`] of measured height, which a list can use for
@@ -57,6 +59,7 @@ impl AnyView {
         AnyWeakView {
             entity: self.entity.downgrade(),
             render: self.render,
+            view_type_name: self.view_type_name,
         }
     }
 
@@ -68,6 +71,7 @@ impl AnyView {
             Err(entity) => Err(Self {
                 entity,
                 render: self.render,
+                view_type_name: self.view_type_name,
             }),
         }
     }
@@ -99,8 +103,16 @@ impl View for AnyView {
         Some(self.entity.entity_id())
     }
 
+    #[cfg(not(gpui_hot_reload))]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         (self.render)(&self, window, cx)
+    }
+
+    // The stored function pointer was captured from the original binary, so it must be looked up
+    // in the jump table to reach the patched render.
+    #[cfg(gpui_hot_reload)]
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        subsecond::HotFn::current(self.render).call((&self, window, cx))
     }
 }
 
@@ -108,7 +120,7 @@ impl<V: 'static + Render> IntoElement for Entity<V> {
     type Element = ViewElement<Entity<V>>;
 
     fn into_element(self) -> Self::Element {
-        ViewElement::new(self)
+        ViewElement::with_type_name(self, type_name::<V>())
     }
 
     #[inline(never)]
@@ -121,7 +133,8 @@ impl IntoElement for AnyView {
     type Element = ViewElement<AnyView>;
 
     fn into_element(self) -> Self::Element {
-        ViewElement::new(self)
+        let view_type_name = self.view_type_name;
+        ViewElement::with_type_name(self, view_type_name)
     }
 }
 
@@ -129,6 +142,7 @@ impl IntoElement for AnyView {
 pub struct AnyWeakView {
     entity: AnyWeakEntity,
     render: fn(&AnyView, &mut Window, &mut App) -> AnyElement,
+    view_type_name: &'static str,
 }
 
 impl AnyWeakView {
@@ -138,6 +152,7 @@ impl AnyWeakView {
         Some(AnyView {
             entity,
             render: self.render,
+            view_type_name: self.view_type_name,
         })
     }
 }
@@ -147,6 +162,7 @@ impl<V: 'static + Render> From<WeakEntity<V>> for AnyWeakView {
         AnyWeakView {
             entity: view.into(),
             render: any_view::render::<V>,
+            view_type_name: type_name::<V>(),
         }
     }
 }
@@ -266,7 +282,7 @@ impl<T: Render> Entity<T> {
     /// uncached case.
     #[track_caller]
     pub fn cached(self, style: StyleRefinement) -> ViewElement<Entity<T>> {
-        ViewElement::new(self).cached(style)
+        ViewElement::with_type_name(self, type_name::<T>()).cached(style)
     }
 }
 
@@ -279,6 +295,8 @@ pub struct ViewElement<V: View> {
     cached_style: Option<StyleRefinement>,
     /// Whether a cached view takes its height from what it measured, rather than from its style.
     measured: bool,
+    #[cfg(feature = "profiler")]
+    view_type_name: &'static str,
     #[cfg(debug_assertions)]
     source: &'static core::panic::Location<'static>,
 }
@@ -287,11 +305,21 @@ impl<V: View> ViewElement<V> {
     /// Wrap a [`View`] as an element.
     #[track_caller]
     pub fn new(view: V) -> Self {
+        Self::with_type_name(view, type_name::<V>())
+    }
+
+    /// Wraps a view whose draw time profiling attributes to `view_type_name`,
+    /// such as an entity's type rather than [`Entity`]'s.
+    #[track_caller]
+    #[cfg_attr(not(feature = "profiler"), expect(unused_variables))]
+    pub(crate) fn with_type_name(view: V, view_type_name: &'static str) -> Self {
         let entity_id = view.entity_id();
         ViewElement {
             entity_id,
             cached_style: None,
             measured: false,
+            #[cfg(feature = "profiler")]
+            view_type_name,
             view: Some(view),
             #[cfg(debug_assertions)]
             source: core::panic::Location::caller(),
@@ -392,6 +420,25 @@ struct ViewElementCacheKey {
     bounds: Bounds<Pixels>,
     content_mask: ContentMask<Pixels>,
     text_style: TextStyle,
+    opacity: f32,
+}
+
+#[cfg(not(gpui_hot_reload))]
+#[inline]
+fn render_view<V: View>(view: V, window: &mut Window, cx: &mut App) -> AnyElement {
+    view.render(window, cx).into_any_element()
+}
+
+/// Every view and component render passes through this hot-patchable boundary, so the
+/// patched code for that render and everything it calls runs on the next frame.
+#[cfg(gpui_hot_reload)]
+fn render_view<V: View>(view: V, window: &mut Window, cx: &mut App) -> AnyElement {
+    #[inline(never)]
+    fn render_view_impl<V: View>(view: V, window: &mut Window, cx: &mut App) -> AnyElement {
+        view.render(window, cx).into_any_element()
+    }
+
+    subsecond::HotFn::current(render_view_impl::<V>).call((view, window, cx))
 }
 
 impl<V: View> Element for ViewElement<V> {
@@ -421,8 +468,10 @@ impl<V: View> Element for ViewElement<V> {
         let root_space = window.pending_root_space.take();
         if let Some(entity_id) = self.entity_id {
             // Stateful path: create a reactive boundary.
+            #[cfg(feature = "profiler")]
+            let start = window.window_profiler.begin_view();
             let view = &mut self.view;
-            request_layout_view(
+            let layout = request_layout_view(
                 entity_id,
                 id,
                 self.cached_style.as_ref(),
@@ -430,16 +479,19 @@ impl<V: View> Element for ViewElement<V> {
                 root_space,
                 window,
                 cx,
-                &mut |window, cx| view.take().unwrap().render(window, cx).into_any_element(),
-            )
+                &mut |window, cx| render_view(view.take().unwrap(), window, cx),
+            );
+            #[cfg(feature = "profiler")]
+            window.window_profiler.end_view(
+                start,
+                self.view_type_name,
+                crate::profiler::ViewPhase::RequestLayout,
+            );
+            layout
         } else {
             // Stateless path: isolate subtree via type name (no entity identity).
             request_layout_component(type_name::<V>(), window, cx, &mut |window, cx| {
-                self.view
-                    .take()
-                    .unwrap()
-                    .render(window, cx)
-                    .into_any_element()
+                render_view(self.view.take().unwrap(), window, cx)
             })
         }
     }
@@ -455,7 +507,9 @@ impl<V: View> Element for ViewElement<V> {
     ) -> Option<AnyElement> {
         if let Some(entity_id) = self.entity_id {
             // Stateful path.
-            prepaint_view(
+            #[cfg(feature = "profiler")]
+            let start = window.window_profiler.begin_view();
+            let prepainted = prepaint_view(
                 entity_id,
                 global_id,
                 self.cached_style.is_some() && self.measured,
@@ -463,14 +517,15 @@ impl<V: View> Element for ViewElement<V> {
                 element,
                 window,
                 cx,
-                &mut |window, cx| {
-                    self.view
-                        .take()
-                        .unwrap()
-                        .render(window, cx)
-                        .into_any_element()
-                },
-            )
+                &mut |window, cx| render_view(self.view.take().unwrap(), window, cx),
+            );
+            #[cfg(feature = "profiler")]
+            window.window_profiler.end_view(
+                start,
+                self.view_type_name,
+                crate::profiler::ViewPhase::Prepaint,
+            );
+            prepainted
         } else {
             // Stateless path: just prepaint the element.
             prepaint_component(type_name::<V>(), element, window, cx)
@@ -489,6 +544,8 @@ impl<V: View> Element for ViewElement<V> {
     ) {
         if let Some(entity_id) = self.entity_id {
             // Stateful path.
+            #[cfg(feature = "profiler")]
+            let start = window.window_profiler.begin_view();
             paint_view(
                 entity_id,
                 self.cached_style.is_some(),
@@ -496,6 +553,12 @@ impl<V: View> Element for ViewElement<V> {
                 element,
                 window,
                 cx,
+            );
+            #[cfg(feature = "profiler")]
+            window.window_profiler.end_view(
+                start,
+                self.view_type_name,
+                crate::profiler::ViewPhase::Paint,
             );
         } else {
             // Stateless path: just paint the element.
@@ -634,6 +697,7 @@ fn request_layout_measured_view(
                     bounds: Bounds::default(),
                     content_mask: window.content_mask(),
                     text_style: window.text_style(),
+                    opacity: window.element_opacity(),
                 },
                 accessed_entities,
                 measured: width.map(|width| MeasuredSize {
@@ -693,6 +757,7 @@ fn prepaint_view(
                             bounds,
                             content_mask: window.content_mask(),
                             text_style: window.text_style(),
+                            opacity: window.element_opacity(),
                         };
                         if let Some(measured) = &mut element_state.measured {
                             measured.height = bounds.size.height;
@@ -715,15 +780,18 @@ fn prepaint_view(
                 let measured = element_state
                     .as_ref()
                     .and_then(|element_state| element_state.measured.clone());
+                let opacity = window.element_opacity();
 
                 // A view inside another cached view that redraws is reused too,
-                // unless it was notified itself.
+                // unless it was notified itself. Opacity is compared by bits so that
+                // a NaN opacity still matches itself and the view keeps using its cache.
                 if let Some(mut element_state) = element_state
                     && element_state.cache_key.bounds == bounds
                     && element_state.cache_key.content_mask == content_mask
                     && element_state.cache_key.text_style == text_style
                     && element_state.prepaint_frame + 1 == frame_number
                     && element_state.paint_frame + 1 == frame_number
+                    && element_state.cache_key.opacity.to_bits() == opacity.to_bits()
                     && !window.dirty_views.contains(&entity_id)
                     && !window.refreshing
                     && window.a11y.can_reuse_views(frame_number)
@@ -762,6 +830,7 @@ fn prepaint_view(
                             bounds,
                             content_mask,
                             text_style,
+                            opacity,
                         },
                         measured,
                     },
@@ -802,11 +871,21 @@ fn paint_view(
                     let mut element_state = element_state.unwrap();
 
                     let paint_start = window.paint_index();
+                    let opacity = window.element_opacity();
 
+                    // Prepaint can only predict the opacity paint applies: an ancestor's
+                    // hover or drag-over style depends on this frame's hit test, which
+                    // isn't known until prepaint finishes. The key records what was
+                    // actually painted, and output replayed under a different opacity is
+                    // redrawn on the next frame.
                     if let Some(element) = element {
                         element.paint(window, cx);
+                        element_state.cache_key.opacity = opacity;
                     } else {
                         window.reuse_paint(element_state.paint_range.clone());
+                        if element_state.cache_key.opacity.to_bits() != opacity.to_bits() {
+                            window.request_animation_frame();
+                        }
                     }
 
                     let paint_end = window.paint_index();

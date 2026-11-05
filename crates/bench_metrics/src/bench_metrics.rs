@@ -1,3 +1,4 @@
+// Modified by Mesa Hills Research, as docs/upstream.md in mesa-hills-research/gpui describes.
 //! Criterion measurements beyond wall time, and a way to report several of
 //! them from one benchmark run.
 //!

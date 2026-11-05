@@ -130,7 +130,7 @@ impl Pair {
         #[cfg(target_os = "windows")]
         let platform = gpui_windows::text_system().unwrap();
         #[cfg(target_os = "macos")]
-        let platform: Arc<dyn PlatformTextSystem> = Arc::new(gpui_macos::MacTextSystem::new());
+        let platform: Arc<dyn PlatformTextSystem> = Arc::new(gpui_apple::AppleTextSystem::new());
         platform.add_fonts(bundled_fonts()).unwrap();
         Self::new(platform)
     }

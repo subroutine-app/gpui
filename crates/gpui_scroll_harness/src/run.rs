@@ -5,7 +5,7 @@ use std::{rc::Rc, time::Duration, time::Instant};
 use anyhow::{Context as _, Result};
 use gpui::{
     AnyWindowHandle, AppContext as _, FollowMode, InputEvent as _, ListAlignment, ListOffset,
-    ListState, ScrollDelta, ScrollWheelEvent, WindowHandle, point, px, size,
+    ListState, ScrollDelta, ScrollEvent, WindowHandle, point, px, size,
 };
 use gpui_screenshot::ScreenshotApp;
 
@@ -383,7 +383,7 @@ pub fn run(
                 window.simulate_next_frame(cx);
                 let started = Instant::now();
                 window.dispatch_event(
-                    ScrollWheelEvent {
+                    ScrollEvent {
                         position,
                         delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
                         ..Default::default()

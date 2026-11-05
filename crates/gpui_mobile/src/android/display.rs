@@ -223,6 +223,11 @@ impl fmt::Debug for AndroidDisplay {
 // ── impl PlatformDisplay ──────────────────────────────────────────────────────
 
 impl PlatformDisplay for AndroidDisplay {
+    // The display's refresh rate isn't read yet, so GPUI falls back to its default.
+    fn refresh_interval(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     fn id(&self) -> DisplayId {
         // Truncate the u64 id to u32 — on Android the pointer-derived id
         // fits in 32 bits for the lower half, and DisplayId only stores u32.

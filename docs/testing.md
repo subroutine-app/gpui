@@ -3,9 +3,9 @@
 ## What runs here
 
 - `cargo check --workspace` covers every library, and `cargo clippy --workspace --all-targets` adds
-  the tests and examples.
+  the tests and examples. The crates need Rust 1.98.
 - `cargo test --workspace --tests` runs the tests of every crate, those of the gpui crates and the
-  mobile crate included. `mhr-gpui-macos` has tests only on a Mac.
+  mobile crate included. `mhr-gpui-macos` and `mhr-gpui-apple` have tests only on a Mac.
 - `cargo test -p mhr-gpui-screenshot` runs the screenshot harness's tests and its goldens of
   plain GPUI elements, on Linux.
 - CI runs clippy and all of those tests on Linux, Windows and macOS.

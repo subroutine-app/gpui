@@ -1629,6 +1629,9 @@ impl PlatformWindow for AndroidPlatformWindow {
         self.window.on_close(send_callback);
     }
 
+    // A window on Android stays on its display.
+    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {}
+
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
         // Wire to system dark mode changes via Configuration.
         // PlatformWindow gives us Box<dyn FnMut()> (not Send).

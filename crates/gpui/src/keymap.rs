@@ -880,7 +880,11 @@ mod tests {
         fn assert_bindings(keymap: &Keymap, action: &dyn Action, expected: &[&str]) {
             let actual = keymap
                 .bindings_for_action(action)
-                .map(|binding| binding.keystrokes[0].inner().unparse())
+                .map(|binding| {
+                    binding.keystrokes[0]
+                        .inner()
+                        .unparse(crate::OperatingSystem::Mac)
+                })
                 .collect::<Vec<_>>();
             assert_eq!(actual, expected, "{:?}", action);
         }
@@ -933,7 +937,11 @@ mod tests {
         fn assert_bindings(keymap: &Keymap, action: &dyn Action, expected: &[&str]) {
             let actual = keymap
                 .bindings_for_action(action)
-                .map(|binding| binding.keystrokes[0].inner().unparse())
+                .map(|binding| {
+                    binding.keystrokes[0]
+                        .inner()
+                        .unparse(crate::OperatingSystem::Mac)
+                })
                 .collect::<Vec<_>>();
             assert_eq!(actual, expected, "{:?}", action);
         }
@@ -1128,7 +1136,7 @@ mod tests {
         assert!(dispatched.is_empty());
     }
 
-    fn typed(source: &str) -> Keystroke {
+    fn typed(source: &'static str) -> Keystroke {
         Keystroke::parse(source).unwrap()
     }
 
@@ -1136,7 +1144,7 @@ mod tests {
     #[track_caller]
     fn dispatched(
         keymap: &Keymap,
-        input: &[&str],
+        input: &[&'static str],
         contexts: &[&str],
     ) -> Vec<(String, &'static str)> {
         let input = input.iter().map(|source| typed(source)).collect::<Vec<_>>();
@@ -1166,7 +1174,10 @@ mod tests {
             KeyBinding::new("cmd-shift-\\", ActionDelta {}, None),
         ]);
         let gamma = ("ctrl-shift-p".to_string(), "test_only::ActionGamma");
-        let delta = (typed("cmd-shift-\\").unparse(), "test_only::ActionDelta");
+        let delta = (
+            typed("cmd-shift-\\").unparse(crate::OperatingSystem::Mac),
+            "test_only::ActionDelta",
+        );
 
         // Ctrl+Shift+\ on Windows and Linux, and Ctrl+Shift+2, send the symbol without Shift.
         assert_eq!(
@@ -1281,7 +1292,7 @@ mod tests {
     }
 
     /// `null` and `Unbind` of `ActionAlpha`, which disable the same bindings.
-    fn disabling(keystrokes: &str) -> [KeyBinding; 2] {
+    fn disabling(keystrokes: &'static str) -> [KeyBinding; 2] {
         [
             KeyBinding::new(keystrokes, NoAction {}, None),
             KeyBinding::new(keystrokes, Unbind("test_only::ActionAlpha".into()), None),
@@ -1407,7 +1418,11 @@ mod tests {
         ] {
             let spelled = keymap
                 .bindings_for_action(action)
-                .map(|binding| binding.keystrokes[0].inner().unparse())
+                .map(|binding| {
+                    binding.keystrokes[0]
+                        .inner()
+                        .unparse(crate::OperatingSystem::Mac)
+                })
                 .collect::<Vec<_>>();
             assert_eq!(spelled, [expected]);
         }
@@ -1421,7 +1436,7 @@ mod tests {
                     binding
                         .keystrokes()
                         .iter()
-                        .map(|keystroke| keystroke.inner().unparse())
+                        .map(|keystroke| keystroke.inner().unparse(crate::OperatingSystem::Mac))
                         .collect::<Vec<_>>()
                         .join(" "),
                     binding.action().name(),

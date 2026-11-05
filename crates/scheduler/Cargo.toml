@@ -1,6 +1,6 @@
 [package]
 name = "mhr-scheduler"
-version = "0.1.0"
+version = "0.2.0"
 edition = { workspace = true }
 publish = true
 license = "Apache-2.0"
@@ -14,7 +14,7 @@ categories = ["asynchronous", "concurrency"]
 [package.metadata.gpui-pre]
 zed-crate = "scheduler"
 zed-version = "0.1.0"
-zed-rev = "279fe070bb389b79652e52065b2f001edcc0b11b"
+zed-rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038"
 
 [lib]
 path = "src/scheduler.rs"
@@ -28,7 +28,7 @@ wasm-threads = ["dep:wasm_thread", "flume/spin"]
 [dependencies]
 async-task = { workspace = true }
 backtrace = { workspace = true }
-chrono = { workspace = true }
+chrono = { workspace = true, features = ["now", "wasmbind"] }
 flume = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
@@ -36,7 +36,7 @@ rand = { workspace = true }
 web-time = { workspace = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-wasm_thread = { version = "0.3", features = ["es_modules"], optional = true }
+wasm_thread = { workspace = true, optional = true }
 
 [lints]
 workspace = true

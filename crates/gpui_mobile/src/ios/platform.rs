@@ -346,6 +346,16 @@ impl Platform for IosPlatform {
         Task::ready(Err(anyhow!("Keychain not yet implemented for iOS")))
     }
 
+    fn platform_info(&self) -> gpui::PlatformInfo {
+        gpui::PlatformInfo {
+            os: gpui::OperatingSystem::Ios,
+            target: gpui::PlatformTarget::Native,
+        }
+    }
+
+    // The list of screens isn't watched.
+    fn on_displays_changed(&self, _callback: Box<dyn FnMut()>) {}
+
     fn on_keyboard_layout_change(&self, _callback: Box<dyn FnMut()>) {
         // iOS handles keyboard layout changes differently
     }

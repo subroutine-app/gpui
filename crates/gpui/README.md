@@ -13,8 +13,8 @@ README lists what the fork changes. Its crates keep GPUI's library names, so cod
 GPUI is still in active development as Zed's developers work on the Zed code editor, and is still pre-1.0. There will often be breaking changes between versions. You'll also need to use the latest version of stable Rust. Add `gpui`, and optionally `gpui_platform`, to your `Cargo.toml`:
 
 ```toml
-gpui = { package = "mhr-gpui", version = "0.1" }
-gpui_platform = { package = "mhr-gpui-platform", version = "0.1", features = ["font-kit", "wayland", "x11"] }
+gpui = { package = "mhr-gpui", version = "0.2" }
+gpui_platform = { package = "mhr-gpui-platform", version = "0.2", features = ["font-kit", "wayland", "x11"] }
 ```
 
 Everything in a standalone GPUI app starts with an `Application`. You can create one with `gpui_platform::application()`, which picks the windowing and text backends for the host OS, and kick off your application by passing a callback to `Application::run()`. Inside this callback, you can create a new window with `App::open_window()` and register your first root view.
@@ -36,13 +36,13 @@ The features on `gpui_platform` are platform-specific, so the list above is a sa
 - **macOS** — Rendering uses Metal and is always available, but glyph rasterization needs `font-kit`. Without it, GPUI falls back to a placeholder text system that lays text out but renders no glyphs.
 
     ```toml
-    gpui_platform = { package = "mhr-gpui-platform", version = "0.1", features = ["font-kit"] }
+    gpui_platform = { package = "mhr-gpui-platform", version = "0.2", features = ["font-kit"] }
     ```
 
 - **Linux / FreeBSD** — enable at least one windowing backend for desktop windows: `wayland`, `x11`, or both. These features also compile the renderer and text system, so no separate text feature is needed.
 
     ```toml
-    gpui_platform = { package = "mhr-gpui-platform", version = "0.1", features = ["wayland", "x11"] }
+    gpui_platform = { package = "mhr-gpui-platform", version = "0.2", features = ["wayland", "x11"] }
     ```
 
 - **Windows** — no features are required. Windowing uses Win32 and text uses DirectWrite. `font-kit` has no effect here.

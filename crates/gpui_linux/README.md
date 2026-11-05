@@ -9,7 +9,7 @@ Apps get it through `mhr-gpui`. To depend on it directly, keep its library name 
 
 ```toml
 [dependencies]
-gpui_linux = { package = "mhr-gpui-linux", version = "0.1" }
+gpui_linux = { package = "mhr-gpui-linux", version = "0.2" }
 ```
 
 The source is in [mesa-hills-research/gpui](https://github.com/mesa-hills-research/gpui). Apache-2.0, like Zed's gpui.

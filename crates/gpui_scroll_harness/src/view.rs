@@ -10,8 +10,8 @@ use std::{
 
 use gpui::{
     AvailableSpace, Bounds, Context, DispatchPhase, Hitbox, HitboxBehavior, IntoElement, ListState,
-    ParentElement as _, Pixels, Render, ScrollWheelEvent, SharedString, Styled as _, Window,
-    canvas, div, fill, list, point, px, rgb, size,
+    ParentElement as _, Pixels, Render, ScrollEvent, SharedString, Styled as _, Window, canvas,
+    div, fill, list, point, px, rgb, size,
 };
 use gpui_screenshot::{MONO_FAMILY, SANS_FAMILY};
 
@@ -222,7 +222,7 @@ fn mask(state: ListState) -> impl IntoElement {
         |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
         move |_, hitbox: Hitbox, window, _| {
             let view = window.current_view();
-            window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+            window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
                 if !(phase == DispatchPhase::Capture && hitbox.should_handle_scroll(window)) {
                     return;
                 }

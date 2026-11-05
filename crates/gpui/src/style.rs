@@ -1,3 +1,4 @@
+// Modified by Mesa Hills Research, as docs/upstream.md in mesa-hills-research/gpui describes.
 use std::{
     hash::{Hash, Hasher},
     iter, mem,
@@ -1334,9 +1335,7 @@ mod tests {
 
     use super::*;
 
-    use util_macros::perf;
-
-    #[perf]
+    #[test]
     fn test_basic_highlight_style_combination() {
         let style_a = HighlightStyle::default();
         let style_b = HighlightStyle::default();
@@ -1347,7 +1346,7 @@ mod tests {
             "Combining empty styles should not produce a non-empty style."
         );
 
-        let mut style_b = HighlightStyle {
+        let style_b = HighlightStyle {
             color: Some(red()),
             strikethrough: Some(StrikethroughStyle {
                 thickness: px(2.),
@@ -1377,7 +1376,7 @@ mod tests {
             "Blending a style with an empty style should not change the style."
         );
 
-        let mut style_c = expected_style;
+        let style_c = expected_style;
 
         let style_d = HighlightStyle {
             color: Some(blue().alpha(0.7)),
@@ -1421,7 +1420,7 @@ mod tests {
         );
     }
 
-    #[perf]
+    #[test]
     fn test_combine_highlights() {
         assert_eq!(
             combine_highlights(
@@ -1510,7 +1509,7 @@ mod tests {
         );
     }
 
-    #[perf]
+    #[test]
     fn test_text_style_refinement() {
         let mut style = Style::default();
         style.refine(&StyleRefinement::default().text_size(px(20.0)));

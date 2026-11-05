@@ -1,6 +1,6 @@
 [package]
 name = "mhr-sum-tree"
-version = "0.1.0"
+version = "0.2.0"
 edition = { workspace = true }
 publish = true
 license = "Apache-2.0"
@@ -17,7 +17,7 @@ ignored = ["tracing"]
 [package.metadata.gpui-pre]
 zed-crate = "sum_tree"
 zed-version = "0.1.0"
-zed-rev = "279fe070bb389b79652e52065b2f001edcc0b11b"
+zed-rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038"
 
 [lib]
 path = "src/sum_tree.rs"
@@ -30,7 +30,6 @@ test-support = ["proptest"]
 [dependencies]
 heapless = { workspace = true }
 rayon = { workspace = true }
-log = { workspace = true }
 ztracing = { workspace = true }
 tracing = { workspace = true }
 proptest = { workspace = true, optional = true }
@@ -40,6 +39,7 @@ workspace = true
 
 [dev-dependencies]
 ctor = { workspace = true }
+log = { workspace = true }
 rand = { workspace = true }
 proptest = { workspace = true }
 zlog = { workspace = true }

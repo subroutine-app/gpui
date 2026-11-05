@@ -1282,6 +1282,16 @@ impl Platform for AndroidPlatform {
         Rc::new(AndroidKeyboardMapper)
     }
 
+    fn platform_info(&self) -> gpui::PlatformInfo {
+        gpui::PlatformInfo {
+            os: gpui::OperatingSystem::Android,
+            target: gpui::PlatformTarget::Native,
+        }
+    }
+
+    // The list of displays isn't watched.
+    fn on_displays_changed(&self, _callback: Box<dyn FnMut()>) {}
+
     fn on_keyboard_layout_change(&self, callback: Box<dyn FnMut()>) {
         self.state.lock().keyboard_layout_callback = Some(unsafe {
             std::mem::transmute::<Box<dyn FnMut()>, Box<dyn FnMut() + Send>>(callback)
@@ -1500,6 +1510,12 @@ impl Platform for SharedPlatform {
     }
     fn on_keyboard_layout_change(&self, callback: Box<dyn FnMut()>) {
         <AndroidPlatform as Platform>::on_keyboard_layout_change(&self.0, callback)
+    }
+    fn platform_info(&self) -> gpui::PlatformInfo {
+        <AndroidPlatform as Platform>::platform_info(&self.0)
+    }
+    fn on_displays_changed(&self, callback: Box<dyn FnMut()>) {
+        <AndroidPlatform as Platform>::on_displays_changed(&self.0, callback)
     }
 }
 

@@ -1,4 +1,4 @@
-// Modified for gpui-pre (snapshot of zed@279fe07): this module is added by the script.
+// Modified for gpui-pre (snapshot of zed@f816e1f): this module is added by the script.
 // Injected by gpui-kit's script/bump-gpui.ts.
 // Modified by Mesa Hills Research, as docs/upstream.md in mesa-hills-research/gpui describes.
 use proc_macro::{Group, Ident, Literal, Punct, Spacing, TokenStream, TokenTree};

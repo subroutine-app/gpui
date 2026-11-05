@@ -10,7 +10,7 @@ Its version matches the `mhr-gpui` it pins. Tests need Mesa's lavapipe, which is
 
 ```toml
 [dev-dependencies]
-gpui_screenshot = { package = "mhr-gpui-screenshot", version = "0.1" }
+gpui_screenshot = { package = "mhr-gpui-screenshot", version = "0.2" }
 ```
 
 ```rust

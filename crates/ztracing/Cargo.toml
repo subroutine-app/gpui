@@ -1,6 +1,6 @@
 [package]
 name = "mhr-ztracing"
-version = "0.1.0"
+version = "0.2.0"
 edition = { workspace = true }
 publish = true
 license = "Apache-2.0"
@@ -14,31 +14,39 @@ categories = ["development-tools::profiling"]
 [package.metadata.gpui-pre]
 zed-crate = "ztracing"
 zed-version = "0.1.0"
-zed-rev = "279fe070bb389b79652e52065b2f001edcc0b11b"
+zed-rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038"
 
 [lib]
 doctest = false
 name = "ztracing"
 
 [features]
+tracing-tracy = ["dep:tracing-tracy", "dep:tracing-subscriber", "dep:zlog"]
 tracy = ["tracing-tracy", "tracy-client"]
-web = ["dep:async-channel", "dep:js-sys", "dep:wasm-bindgen", "dep:web-sys"]
+web = [
+    "dep:async-channel",
+    "dep:js-sys",
+    "dep:tracing-subscriber",
+    "dep:wasm-bindgen",
+    "dep:web-sys",
+    "dep:zlog",
+]
 
 [dependencies]
-zlog = { workspace = true }
+zlog = { workspace = true, optional = true }
 tracing = { workspace = true }
-tracing-subscriber = "0.3.22"
+tracing-subscriber = { workspace = true, optional = true }
 ztracing_macro = { workspace = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-tracing-tracy = { version = "0.11.4", optional = true, features = ["enable", "ondemand"] }
-tracy-client = { version = "0.18.2", optional = true, features = ["enable", "ondemand"] }
+tracing-tracy = { version = "0.11", optional = true, features = ["ondemand"] }
+tracy-client = { version = "0.18", optional = true, features = ["ondemand"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-async-channel = { workspace = true, optional = true }
+async-channel = { workspace = true, features = ["std"], optional = true }
 js-sys = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
-web-sys = { version = "0.3", features = ["console", "Performance"], optional = true }
+web-sys = { workspace = true, features = ["console", "Performance"], optional = true }
 
 [lints]
 workspace = true

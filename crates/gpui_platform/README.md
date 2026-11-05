@@ -7,8 +7,8 @@ It's part of [mhr-gpui](https://crates.io/crates/mhr-gpui), Mesa Hills Research'
 
 ```toml
 [dependencies]
-gpui = { package = "mhr-gpui", version = "0.1" }
-gpui_platform = { package = "mhr-gpui-platform", version = "0.1", features = ["font-kit", "wayland", "x11"] }
+gpui = { package = "mhr-gpui", version = "0.2" }
+gpui_platform = { package = "mhr-gpui-platform", version = "0.2", features = ["font-kit", "wayland", "x11"] }
 ```
 
 ```rust,ignore

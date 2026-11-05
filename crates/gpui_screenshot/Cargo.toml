@@ -1,6 +1,6 @@
 [package]
 name = "mhr-gpui-screenshot"
-version = "0.1.9"
+version = "0.2.0"
 edition = { workspace = true }
 publish = true
 # The code is Apache-2.0. The bundled fonts keep the licences in fonts/.
@@ -30,7 +30,7 @@ sha2 = { workspace = true }
 swash = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-gpui_macos = { workspace = true, features = ["font-kit", "test-support"] }
+gpui_apple = { workspace = true, features = ["font-kit", "test-support"] }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 gpui_windows = { workspace = true, features = ["test-support"] }

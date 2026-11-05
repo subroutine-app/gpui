@@ -10,7 +10,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     self as gpui, AppContext, Context, Element, FollowMode, IntoElement, ListState, Render,
-    ScrollDelta, ScrollWheelEvent, Styled, TestAppContext, Window, div, list, point, px, size,
+    ScrollDelta, ScrollEvent, Styled, TestAppContext, Window, div, list, point, px, size,
 };
 
 const WIDTH: f32 = 800.;
@@ -261,7 +261,7 @@ pub(super) fn wheel(cx: &mut gpui::VisualTestContext, state: &ListState, dy: f32
         state.set_offset_from_scrollbar(point(px(0.), asked));
         return;
     }
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: point(px(WIDTH / 2.), px(HEIGHT / 2.)),
         delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
         ..Default::default()

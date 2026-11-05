@@ -22,6 +22,10 @@ every Monday and by hand. For 0.3.8 the script:
 - left out every `[dev-dependencies]` table (some are back, see [testing.md](testing.md))
 - put `LICENSE-APACHE` in every crate and Zed's root `LICENSE-*` files at the workspace root
 
+For 0.3.11 it did the same for 24 crates. `gpui_ios` joined them, and `perf` and `util_macros`
+left, since gpui no longer needs them. The script also swaps wgpu's git source for crates.io wgpu
+30.0.1 and relaxes more pins. The commit of each release on `upstream` lists what its log reports.
+
 ## Bringing in a release
 
 The worked example is 0.3.8, which needed Zed `279fe070`, gpui-kit `42fbb97` and Bun 1.4.2.
@@ -113,6 +117,9 @@ and `mhr-gpui-macros` changed and the rest pin `mhr-gpui`. So does 0.1.8, for th
 Version 0.1.9 covers nine, since only `mhr-gpui` changed and the other eight pin it.
 `mhr-gpui-macros` pins nothing that changed, so it stays at 0.1.8 and the others pin it there.
 The rest stay at 0.1.0, and the new versions pin them at `=0.1.0`.
+A new gpui-pre release changes every crate, so it starts a new minor line for all of them.
+Version 0.2.0 brings in gpui-pre 0.3.11 and covers all 25 published crates, `mhr-gpui-ios`
+among them for the first time, and `mhr-perf` and `mhr-util-macros` end at 0.1.0.
 `git diff --stat <last release> HEAD -- crates tooling` shows what changed. Publish the crates of
 the release by name, since cargo refuses a version that's already on crates.io. The command below
 names all ten, so leave out `-p mhr-gpui-macros` for a release such as 0.1.9 that doesn't change
@@ -159,11 +166,14 @@ adds the same line.
 - **The golden ratio**, in `mhr-gpui`'s `src/geometry.rs`. `phi()` returns
   `f32::consts::GOLDEN_RATIO` in place of the literal `1.618_034`, which is the same `f32` and
   which the clippy of Rust 1.99 rejects. `mhr-gpui-apple`'s copy under `vendor/gpui` follows it.
-- **Zed's forks from crates.io**, in the workspace's `Cargo.toml` and those of `mhr-gpui` and
-  five sibling crates. Zed's manifests name its forks of font-kit, xim, scap and wasm_thread by
-  git revision beside a crates.io version, and a published crate gets the crates.io release. This
-  workspace names only the crates.io releases, so its builds and tests use what the published
-  crates get. font-kit, xim and scap have the same sources as the revisions. In wasm_thread 0.3.3
+- **Zed's forks from crates.io**, in the workspace's `Cargo.toml` and those of `mhr-gpui-linux`
+  and `mhr-gpui-web`'s `hello_web` example. Zed's manifests name its forks of font-kit, xim, scap,
+  oo7 and wasm_thread by git revision beside a crates.io version, and a published crate gets the
+  crates.io release. This workspace names only the crates.io releases, so its builds and tests use
+  what the published crates get. Since 0.3.11, font-kit, oo7 and wasm_thread are named in the
+  workspace's `[workspace.dependencies]`. font-kit, xim and scap have the same sources as the
+  revisions. oo7, which only Linux uses, is 0.6 from crates.io, as the published crates get it,
+  and hasn't been compared with Zed's revision. In wasm_thread 0.3.3
   the web workers start wasm-bindgen with positional arguments, which wasm-bindgen still accepts
   with a deprecation warning in the console. A merge from `upstream` brings the git revisions back
   where upstream changed those lines.
@@ -201,7 +211,10 @@ adds the same line.
   they had until the next frame makes the estimate, because the mean height of the other items
   would shorten the scroll range for a moment and put the reader's place beyond its end. The
   scrollbar works out a position from items that wait for an estimate, but doesn't keep it as the
-  place its thumb moves on from. The tests at the end of `list.rs` cover it, and those in
+  place its thumb moves on from. Upstream 0.3.11 keeps the list's scroll top and the adjustment
+  a remeasure leaves for it in one scroll anchor, and lets an app mark measurements provisional
+  with `ListState::set_item_measurement_readiness`. The scrollbar sets the anchor like any scroll,
+  and an item measured provisionally counts the height it measured, with no new estimate. The tests at the end of `list.rs` cover it, and those in
   `src/elements/list_smooth_tests.rs` measure how steadily the thumb moves over a transcript of
   mixed rows, with and without estimates.
 - **Cached views inside cached views stay cached**, in `mhr-gpui`'s `src/view.rs`,
@@ -221,7 +234,8 @@ adds the same line.
 - **A check for one font family**, `TextSystem::has_font_family`, in `mhr-gpui`'s
   `src/text_system.rs` and `src/platform.rs`, with lookups in `mhr-gpui-wgpu`'s
   `src/cosmic_text_system.rs`, `mhr-gpui-windows`' `src/direct_write.rs` and `mhr-gpui-macos`'
-  `src/text_system.rs`. Finding out whether a family was installed meant listing every family
+  `src/text_system.rs`, which 0.3.11 moved to `mhr-gpui-apple`'s `src/text_system.rs`. Finding
+  out whether a family was installed meant listing every family
   with `all_font_names`. The new method finds the family the way a `Font`'s family is found, and
   other platform text systems search `all_font_names` by default. `mhr-gpui-apple`'s copy of
   `platform.rs` under `vendor/gpui` follows the original.
@@ -267,7 +281,8 @@ adds the same line.
   replays a nested slide frame after frame.
 - **Cached list items of measured height**, in `mhr-gpui`'s `src/view.rs`, `src/element.rs` and
   `src/window.rs`. `Entity::cached_measured` and `AnyView::cached_measured` embed a view that
-  takes the height it measured, where `cached` takes its size from a style. `Drawable::layout_as_root`
+  takes the height it measured, where `cached` takes its size from a style. Since 0.3.11 a cached
+  view's key holds the opacity it painted under, and a view of measured height keeps it too. `Drawable::layout_as_root`
   hands a view at the root of the layout the space it is laid out in, and the view reuses the
   height it measured when it is clean, was measured at the same width, text style and rem size,
   and the window isn't refreshing. Its layout is then a leaf of that height. Otherwise it renders
@@ -304,8 +319,9 @@ adds the same line.
   time a line end within a fraction of a pixel of the wrap width. The same test runs with
   DirectWrite on Windows and CoreText on macOS if they ever say they shape words independently, and
   adds a text of words that start with A, T, V, W or Y in Arial, Times New Roman, Helvetica and the
-  like, since a font may kern a space against those. `mhr-gpui-windows`' `src/gpui_windows.rs` and
-  `mhr-gpui-macos`' `src/gpui_macos.rs` give it the platform's text system under `test-support`.
+  like, since a font may kern a space against those. `mhr-gpui-windows`' `src/gpui_windows.rs`
+  gives it the platform's text system under `test-support`. On macOS it uses
+  `gpui_apple::AppleTextSystem`, which upstream made public in 0.3.11.
 - **Shift on a symbol key in key bindings**, in `mhr-gpui`'s `src/platform/keystroke.rs`, with
   documentation in `src/keymap/binding.rs`. Windows, Linux and macOS send Ctrl+Shift+\ on a US
   keyboard as `ctrl-|`, since they drop Shift from every key that isn't a letter or a named key,
@@ -347,9 +363,11 @@ adds the same line.
   The mapping happens in `KeyBinding::load`, so a binding keeps the keys it was loaded with after a
   layout change, and an app loads its keymap again from `App::on_keyboard_layout_change`.
 - **Tests and examples that build**, in the `Cargo.toml` of `mhr-gpui`, `mhr-gpui-wgpu`,
-  `mhr-gpui-web`, `mhr-gpui-macos`, `mhr-gpui-macros`, `mhr-sum-tree` and `mhr-zlog`. The release
-  tooling leaves out `[dev-dependencies]`, so these crates' tests didn't build. Each crate has the
-  dev-dependencies its tests use again, as in Zed.
+  `mhr-gpui-web`, `mhr-gpui-macos`, `mhr-gpui-apple`, `mhr-gpui-macros`, `mhr-sum-tree` and
+  `mhr-zlog`. The release tooling leaves out `[dev-dependencies]`, so these crates' tests didn't
+  build. Each crate has the dev-dependencies its tests use again, as in Zed. Since 0.3.11 the
+  release has no `util_macros`, so the three tests in `mhr-gpui`'s `src/style.rs` that Zed marks
+  `#[perf]` are plain `#[test]`s, which is what `#[perf]` runs them as outside Zed's benchmarks.
   `mhr-gpui-macros` takes `gpui` by path without a version, so its published manifest leaves it
   out and a new `mhr-gpui` never forces a new `mhr-gpui-macros`. The workspace's `assets/fonts`
   holds the three fonts of Zed's `assets/fonts` that tests include (IBM Plex Sans Regular and Lilex
@@ -382,7 +400,8 @@ adds the same line.
   one of no duration ends as it starts, as a paint animation of no duration does.
   `VisualTestContext::draw` sets the frame's time before it draws. `mhr-gpui-apple`'s copy of
   `window.rs` under `vendor/gpui` follows it. Tests at the end of `animation.rs` and `img.rs` cover
-  it.
+  it. Upstream 0.3.11 moved `with_animation` to the executor's clock too, read as each element
+  lays out. The frame's time is kept here, so every animation of a frame is at the same point.
 - **Property tests with proptest from crates.io**, in `mhr-gpui-macros`' `src/property_test.rs`
   and `Cargo.toml` and the workspace's `Cargo.toml`. `#[gpui::property_test]` gave proptest's
   macro `proptest_path` as a string, as Zed's git revision of proptest takes it. Proptest 1.11's
@@ -418,6 +437,11 @@ git -C <gpui-mobile clone> format-patch --stdout 9075e3a..origin/main -- . ':!.g
 ```
 
 Skip upstream's "Bump gpui-pre" commits, since the workspace sets that version.
+
+Its `wgpu` follows `mhr-gpui-wgpu`'s, 30.0.1 for gpui-pre 0.3.11, since it hands wgpu types to it.
+For 0.3.11 its iOS and Android platforms implement the new `platform_info`, `on_displays_changed`,
+`on_display_changed` and `refresh_interval`. The callbacks are kept by nobody, since neither
+platform watches its displays, and Android reports no refresh interval, so GPUI uses its default.
 
 In `src/momentum.rs`, the velocity tracker's test gives its samples their own times instead of
 sleeping between them, because sleeps overshoot on busy CI runners and the test failed there.
