@@ -536,6 +536,37 @@ copy of the gpui-pre 0.3.11 crates first, and they are ported here onto the fork
   [Apple's WWDC25 AppKit session](https://developer.apple.com/videos/play/wwdc2025/310/)
   describes toolbar-dependent window corners. `mhr-gpui-apple`'s copy of `platform.rs` under
   `vendor/gpui` follows it.
+- **Backdrop snapshots**, in `mhr-gpui`'s `src/scene.rs`, `src/window.rs`, `src/style.rs` and
+  `src/styled.rs`, and the renderers of `mhr-gpui-apple` (`src/metal_renderer.rs`),
+  `mhr-gpui-wgpu` (`src/wgpu_renderer.rs`) and `mhr-gpui-windows` (`src/directx_renderer.rs`).
+  A backdrop filter blurred what was painted before it, so a frosted panel on a modal's scrim
+  blurred the scrim's tint with the page, which in a light theme turned the glass grey.
+  `Styled::backdrop_snapshot` sets `Style::backdrop_snapshot`, and `Window::with_backdrop_snapshot`
+  brackets what an element paints, before its shadows and background, with
+  `Scene::push_backdrop_snapshot` and `Scene::pop_backdrop_snapshot`, so the element's own
+  backdrop filter reads the snapshot too. The push inserts a
+  `BackdropSnapshot` into `Scene::backdrop_snapshots` with an order above everything painted
+  before it and raises the order floor, so everything painted after it sorts above it, and the
+  batches yield it as `PrimitiveBatch::BackdropSnapshot`. A `BackdropFilter` inserted under it
+  gets `BackdropSource::Snapshot` in its new `source` field from the scene's stack of open
+  snapshots, the innermost, and one inserted outside every snapshot gets `BackdropSource::Live`.
+  The scene resolves the source when the filter is inserted, so a replayed cached view reads the
+  snapshot of the frame it is replayed into, and a `deferred` child, which paints after the main
+  scene, reads the live frame. Inside a `paint_layer`, whose primitives share one order, no
+  snapshot is taken. The pushes and pops are paint operations of their own, and replay follows
+  them. `Scene::backdrop_snapshot_slots` gives each snapshot a texture: none for a snapshot no
+  filter reads, which isn't copied, and a texture shared by snapshots one after another, free
+  again once the last filter that reads its snapshot has drawn. Each renderer keeps up to four,
+  made at full resolution the first time a frame needs each one and kept with its blur targets,
+  and copies the current target into one with the blit pass that copies the scene out. A
+  snapshot that finds all four taken gets none, and its filters read the live frame. A frame
+  without a filter that reads a snapshot renders as before, and the shaders don't change. The
+  tests in `filter_tests` at the
+  end of `scene.rs` check the order of snapshots, which filters read them, nesting, layers,
+  replay and the sharing of textures, a test in `window.rs` checks a scrim with a frosted child
+  and a deferred one, and `metal_renderer.rs` and `wgpu_renderer.rs` (on Linux) render a white
+  page under a half-black scrim and check that a panel blurs the page. `mhr-gpui-apple`'s copies
+  of `scene.rs` and `window.rs` under `vendor/gpui` follow them.
 
 GPUI Kit's vendored copy also carried paint animations, a modifier observer and glyph colors at
 paint time, which it ported from Mesa Hills Research's `mhr-gpui` 0.1.9. This fork keeps Mesa's

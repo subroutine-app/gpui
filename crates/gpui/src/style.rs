@@ -299,6 +299,11 @@ pub struct Style {
     /// Filters applied to the content rendered behind this element (CSS `backdrop-filter`).
     pub backdrop_filter: Vec<Filter>,
 
+    /// Whether this element records a backdrop snapshot before it paints, which the backdrop
+    /// filters it and its children paint read instead of the live frame. See
+    /// [`Window::with_backdrop_snapshot`].
+    pub backdrop_snapshot: bool,
+
     /// The text style of this element
     #[refineable]
     pub text: TextStyleRefinement,
@@ -771,6 +776,27 @@ impl Style {
             window.paint_quad(crate::outline(bounds, crate::red(), BorderStyle::default()));
         }
 
+        if self.backdrop_snapshot {
+            window.with_backdrop_snapshot(bounds, |window| {
+                self.paint_element(bounds, window, cx, continuation)
+            });
+        } else {
+            self.paint_element(bounds, window, cx, continuation);
+        }
+
+        #[cfg(debug_assertions)]
+        if self.debug_below {
+            cx.remove_global::<DebugBelow>();
+        }
+    }
+
+    fn paint_element(
+        &self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+        continuation: impl FnOnce(&mut Window, &mut App),
+    ) {
         let rem_size = window.rem_size();
         let corner_radii = self
             .corner_radii
@@ -842,11 +868,6 @@ impl Style {
                 paint_box(window, cx);
             });
         }
-
-        #[cfg(debug_assertions)]
-        if self.debug_below {
-            cx.remove_global::<DebugBelow>();
-        }
     }
 
     fn is_border_visible(&self) -> bool {
@@ -896,6 +917,7 @@ impl Default for Style {
             box_shadow: Default::default(),
             filter: Default::default(),
             backdrop_filter: Default::default(),
+            backdrop_snapshot: false,
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,

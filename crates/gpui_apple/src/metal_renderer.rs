@@ -3,9 +3,9 @@ use crate::metal_atlas::MetalAtlas;
 use anyhow::{Context as _, Result};
 use block2::RcBlock;
 use gpui::{
-    AtlasTextureId, Background, Bounds, ContentMask, Corners, DevicePixels, FilterBoundary,
-    PaintSurface, Path, Point, PrimitiveBatch, ScaledFilter, ScaledPixels, Scene, Size, point,
-    size,
+    AtlasTextureId, BackdropFilter, BackdropSource, Background, Bounds, ContentMask, Corners,
+    DevicePixels, FilterBoundary, PaintSurface, Path, Point, PrimitiveBatch, ScaledFilter,
+    ScaledPixels, Scene, Size, point, size,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use image::RgbaImage;
@@ -51,6 +51,10 @@ const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 /// Content-filter nesting levels that get their own isolated group texture; deeper nests render
 /// inline. Must match the wgpu and DirectX backends so nested blur renders consistently.
 const MAX_FILTER_DEPTH: usize = 2;
+/// Backdrop snapshots that can hold a copy of the frame at once, each a full-resolution texture
+/// made the first time a frame needs it. A filter whose snapshot finds none free reads the live
+/// frame. Must match the wgpu and DirectX backends.
+const MAX_BACKDROP_SNAPSHOTS: usize = 4;
 
 /// What a filter chain asks of the composite pass. Exhaustive on purpose: a new
 /// [`ScaledFilter`] variant must be handled (or deliberately ignored) by this backend.
@@ -209,7 +213,8 @@ pub struct MetalRenderer {
 /// Render targets for filter passes. The scene renders into `scene` (the drawable is
 /// framebuffer-only and cannot be sampled), then is copied to the drawable. `ping`/`pong` are
 /// the half-resolution blur targets; `groups` holds one full-resolution target per isolated
-/// content-filter nesting level.
+/// content-filter nesting level, and `snapshots` the copies of the frame that backdrop filters
+/// read, as many as a frame has needed.
 #[derive(Clone)]
 struct BlurTargets {
     size: Size<DevicePixels>,
@@ -217,35 +222,57 @@ struct BlurTargets {
     ping: Retained<ProtocolObject<dyn MTLTexture>>,
     pong: Retained<ProtocolObject<dyn MTLTexture>>,
     groups: Vec<Retained<ProtocolObject<dyn MTLTexture>>>,
+    snapshots: Vec<Retained<ProtocolObject<dyn MTLTexture>>>,
 }
 
 impl BlurTargets {
     fn new(device: &ProtocolObject<dyn MTLDevice>, size: Size<DevicePixels>) -> Result<Self> {
-        let texture = |width: i32, height: i32| {
-            let descriptor = MTLTextureDescriptor::new();
-            // SAFETY: The dimensions are clamped positive and this descriptor creates a 2D texture.
-            unsafe {
-                descriptor.setWidth(width.max(1) as usize);
-                descriptor.setHeight(height.max(1) as usize);
-            }
-            descriptor.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-            descriptor.setStorageMode(MTLStorageMode::Private);
-            descriptor.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
-            device
-                .newTextureWithDescriptor(&descriptor)
-                .context("allocating blur render target")
-        };
         let (width, height) = (size.width.0, size.height.0);
         Ok(Self {
             size,
-            scene: texture(width, height)?,
-            ping: texture(width / 2, height / 2)?,
-            pong: texture(width / 2, height / 2)?,
+            scene: blur_texture(device, width, height)?,
+            ping: blur_texture(device, width / 2, height / 2)?,
+            pong: blur_texture(device, width / 2, height / 2)?,
             groups: (0..MAX_FILTER_DEPTH)
-                .map(|_| texture(width, height))
+                .map(|_| blur_texture(device, width, height))
                 .collect::<Result<_>>()?,
+            snapshots: Vec::new(),
         })
     }
+
+    /// The texture a backdrop filter reads, given the slots of the frame's snapshots.
+    fn backdrop_source<'a>(
+        &'a self,
+        filter: &BackdropFilter,
+        snapshot_slots: &[Option<usize>],
+        live: &'a ProtocolObject<dyn MTLTexture>,
+    ) -> &'a ProtocolObject<dyn MTLTexture> {
+        match filter.source {
+            BackdropSource::Live => live,
+            BackdropSource::Snapshot(snapshot) => {
+                snapshot_slots[snapshot].map_or(live, |slot| &*self.snapshots[slot])
+            }
+        }
+    }
+}
+
+fn blur_texture(
+    device: &ProtocolObject<dyn MTLDevice>,
+    width: i32,
+    height: i32,
+) -> Result<Retained<ProtocolObject<dyn MTLTexture>>> {
+    let descriptor = MTLTextureDescriptor::new();
+    // SAFETY: The dimensions are clamped positive and this descriptor creates a 2D texture.
+    unsafe {
+        descriptor.setWidth(width.max(1) as usize);
+        descriptor.setHeight(height.max(1) as usize);
+    }
+    descriptor.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+    descriptor.setStorageMode(MTLStorageMode::Private);
+    descriptor.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+    device
+        .newTextureWithDescriptor(&descriptor)
+        .context("allocating blur render target")
 }
 
 /// Mirrors `BlurParams` in `shaders.metal`.
@@ -1043,11 +1070,20 @@ impl MetalRenderer {
 
         // Filters sample already-painted content, which the framebuffer-only drawable cannot
         // provide, so a scene with filters renders offscreen and is copied out at the end.
-        let blur_targets =
+        let (blur_targets, snapshot_slots) =
             if scene.backdrop_filters.is_empty() && scene.filter_boundaries.is_empty() {
-                None
+                (None, Vec::new())
             } else {
-                Some(self.blur_targets(viewport_size)?)
+                let snapshot_slots = scene.backdrop_snapshot_slots(MAX_BACKDROP_SNAPSHOTS);
+                let snapshots = snapshot_slots
+                    .iter()
+                    .flatten()
+                    .max()
+                    .map_or(0, |slot| slot + 1);
+                (
+                    Some(self.blur_targets(viewport_size, snapshots)?),
+                    snapshot_slots,
+                )
             };
         let scene_target = blur_targets
             .as_ref()
@@ -1149,7 +1185,7 @@ impl MetalRenderer {
                         self.filter_and_composite(
                             &command_buffer,
                             targets,
-                            current_target,
+                            targets.backdrop_source(filter, &snapshot_slots, current_target),
                             current_target,
                             viewport_size,
                             BlurComposite {
@@ -1223,6 +1259,30 @@ impl MetalRenderer {
                         )?;
                     }
                 }
+                PrimitiveBatch::BackdropSnapshot(ix) => {
+                    let (Some(targets), Some(slot)) =
+                        (&blur_targets, snapshot_slots.get(ix).copied().flatten())
+                    else {
+                        continue;
+                    };
+                    command_encoder.endEncoding();
+                    self.run_blur_pass(
+                        &command_buffer,
+                        &self.blur_downsample_pipeline_state,
+                        &targets.snapshots[slot],
+                        current_target,
+                        viewport_size,
+                        None,
+                        BlurUniform::default(),
+                        false,
+                    )?;
+                    command_encoder = new_command_encoder_for_texture(
+                        &command_buffer,
+                        current_target,
+                        viewport_size,
+                        None,
+                    )?;
+                }
             }
         }
 
@@ -1244,15 +1304,18 @@ impl MetalRenderer {
         Ok(command_buffer)
     }
 
-    fn blur_targets(&mut self, size: Size<DevicePixels>) -> Result<BlurTargets> {
-        match &self.blur_targets {
-            Some(targets) if targets.size == size => Ok(targets.clone()),
-            _ => {
-                let targets = BlurTargets::new(&self.device, size)?;
-                self.blur_targets = Some(targets.clone());
-                Ok(targets)
-            }
+    fn blur_targets(&mut self, size: Size<DevicePixels>, snapshots: usize) -> Result<BlurTargets> {
+        let mut targets = match self.blur_targets.take() {
+            Some(targets) if targets.size == size => targets,
+            _ => BlurTargets::new(&self.device, size)?,
+        };
+        while targets.snapshots.len() < snapshots {
+            targets
+                .snapshots
+                .push(blur_texture(&self.device, size.width.0, size.height.0)?);
         }
+        self.blur_targets = Some(targets.clone());
+        Ok(targets)
     }
 
     /// Draw one full-target quad sampling `source` into `target` with `pipeline`. `load` keeps
@@ -2560,6 +2623,64 @@ mod tests {
             renderer.update_drawable_size(size(DevicePixels(width), DevicePixels(height)));
             assert!(renderer.render_to_image(&Scene::default()).is_err());
         }
+        Ok(())
+    }
+
+    /// A white page under a half-black scrim, and a frosted panel on the scrim. The panel blurs
+    /// the scrim's tint with the live frame, and the white page with a snapshot taken before
+    /// the scrim. Around the panel the scrim is the same either way.
+    #[test]
+    fn a_backdrop_snapshot_leaves_the_scrim_out_of_the_blur() -> Result<()> {
+        fn rect(origin: f32, side: f32) -> Bounds<ScaledPixels> {
+            Bounds {
+                origin: point(ScaledPixels(origin), ScaledPixels(origin)),
+                size: size(ScaledPixels(side), ScaledPixels(side)),
+            }
+        }
+        fn fill(bounds: Bounds<ScaledPixels>, color: gpui::Hsla) -> gpui::Quad {
+            gpui::Quad {
+                bounds,
+                content_mask: ContentMask { bounds },
+                background: color.into(),
+                ..Default::default()
+            }
+        }
+
+        let mut renderer = MetalRenderer::new_headless(Default::default())?;
+        let mut render = |snapshot: bool| -> Result<RgbaImage> {
+            let page = rect(0., 64.);
+            let mut scene = Scene::default();
+            scene.insert_primitive(fill(page, gpui::white()));
+            if snapshot {
+                scene.push_backdrop_snapshot(page);
+            }
+            scene.insert_primitive(fill(page, gpui::black().opacity(0.5)));
+            scene.insert_primitive(BackdropFilter {
+                bounds: rect(16., 32.),
+                content_mask: ContentMask { bounds: page },
+                filters: smallvec::smallvec![ScaledFilter::Blur(ScaledPixels(4.))],
+                opacity: 1.,
+                ..Default::default()
+            });
+            if snapshot {
+                scene.pop_backdrop_snapshot();
+            }
+            scene.finish();
+            renderer.render_scene_to_image(&scene, size(DevicePixels(64), DevicePixels(64)))
+        };
+
+        let live = render(false)?;
+        let snapshot = render(true)?;
+        let panel = |image: &RgbaImage| image.get_pixel(32, 32).0;
+        let scrim = |image: &RgbaImage| image.get_pixel(4, 4).0;
+        assert!(panel(&live)[0] < 200, "live panel: {:?}", panel(&live));
+        assert!(
+            panel(&snapshot)[..3].iter().all(|channel| *channel > 245),
+            "snapshot panel: {:?}",
+            panel(&snapshot)
+        );
+        assert_eq!(scrim(&live), scrim(&snapshot));
+        assert!(scrim(&snapshot)[0] < 200);
         Ok(())
     }
 

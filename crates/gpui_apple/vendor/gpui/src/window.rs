@@ -5336,6 +5336,7 @@ impl Window {
             corner_radii: corner_radii.scale(scale_factor),
             filters,
             opacity: self.element_opacity(),
+            source: crate::BackdropSource::Live,
         });
     }
 
@@ -5391,6 +5392,31 @@ impl Window {
             ..boundary
         });
 
+        result
+    }
+
+    /// Record a backdrop snapshot before `f` paints: the backdrop filters that `f` paints read
+    /// the frame as it was here, instead of the live frame, so what `f` paints before them,
+    /// such as the scrim of a modal overlay, isn't in what they blur. The innermost snapshot
+    /// around a filter is the one it reads. What paints outside `f`, including what `f` defers
+    /// with [`crate::deferred`], which paints after it, reads the live frame. Inside
+    /// [`Self::paint_layer`] no snapshot is taken.
+    ///
+    /// A renderer copies the frame only for a snapshot that a filter reads. When too many
+    /// snapshots are read at once, the later ones read the live frame.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn with_backdrop_snapshot<R>(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint();
+
+        let bounds = self.snap_bounds(bounds);
+        self.next_frame.scene.push_backdrop_snapshot(bounds);
+        let result = f(self);
+        self.next_frame.scene.pop_backdrop_snapshot();
         result
     }
 
@@ -9553,6 +9579,60 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(painted(cx), hsla(0.5, 1., 0.5, 1.));
+    }
+
+    /// A frosted panel on a scrim that takes a backdrop snapshot reads the snapshot, which is
+    /// taken before the scrim paints, and what the scrim defers reads the live frame.
+    #[gpui::test]
+    fn filters_under_a_backdrop_snapshot_read_it(cx: &mut TestAppContext) {
+        struct Overlay;
+
+        impl Render for Overlay {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let frosted = || div().size(px(20.)).backdrop_blur(px(8.));
+                div()
+                    .size(px(100.))
+                    .bg(crate::white())
+                    .child(
+                        div()
+                            .size_full()
+                            .backdrop_snapshot()
+                            .bg(crate::black().opacity(0.4))
+                            .child(frosted())
+                            .child(crate::deferred(frosted())),
+                    )
+                    .child(frosted())
+            }
+        }
+
+        let (_, cx) = cx.add_window_view(|_, _| Overlay);
+        cx.run_until_parked();
+        cx.update(|window, _| {
+            let scene = window.rendered_scene();
+            assert_eq!(scene.backdrop_snapshots.len(), 1);
+            let snapshot = scene.backdrop_snapshots[0].order;
+            let scrim = scene
+                .quads
+                .iter()
+                .find(|quad| quad.background.solid == crate::black().opacity(0.4))
+                .expect("the scrim is painted");
+            assert!(snapshot < scrim.order);
+
+            let mut sources = scene
+                .backdrop_filters
+                .iter()
+                .map(|filter| filter.source)
+                .collect::<Vec<_>>();
+            sources.sort_by_key(|source| matches!(source, crate::BackdropSource::Live));
+            assert_eq!(
+                sources,
+                [
+                    crate::BackdropSource::Snapshot(0),
+                    crate::BackdropSource::Live,
+                    crate::BackdropSource::Live
+                ]
+            );
+        });
     }
 
     /// Element handlers hear a modifier change along the focused path only, so

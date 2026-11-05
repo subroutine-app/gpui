@@ -26,6 +26,10 @@ const INSTANCE_TEXTURE_TEXEL_SIZE: u64 = 16;
 /// Content-filter nesting levels that get their own isolated group texture; deeper nests render
 /// inline. Must match the Metal and DirectX backends so nested blur renders consistently.
 const MAX_FILTER_DEPTH: usize = 2;
+/// Backdrop snapshots that can hold a copy of the frame at once, each a full-resolution texture
+/// made the first time a frame needs it. A filter whose snapshot finds none free reads the live
+/// frame. Must match the Metal and DirectX backends.
+const MAX_BACKDROP_SNAPSHOTS: usize = 4;
 
 /// Blur-params slots allocated up front; a frame with more passes grows the buffer.
 const INITIAL_BLUR_PARAMS_SLOTS: u64 = 64;
@@ -240,7 +244,8 @@ impl BlurComposite {
 /// Render targets for filter passes, keyed by the frame size they were allocated for. The scene
 /// renders into `scene` so passes can sample already-painted content, then is copied to the
 /// frame. `ping`/`pong` are half resolution; `groups` holds one full-resolution target per
-/// isolated content-filter nesting level. Views keep their textures alive.
+/// isolated content-filter nesting level, and `snapshots` the copies of the frame that backdrop
+/// filters read, as many as a frame has needed. Views keep their textures alive.
 #[derive(Clone)]
 struct BlurTargets {
     size: Size<DevicePixels>,
@@ -248,6 +253,24 @@ struct BlurTargets {
     ping: wgpu::TextureView,
     pong: wgpu::TextureView,
     groups: Vec<wgpu::TextureView>,
+    snapshots: Vec<wgpu::TextureView>,
+}
+
+impl BlurTargets {
+    /// The texture a backdrop filter reads, given the slots of the frame's snapshots.
+    fn backdrop_source<'a>(
+        &'a self,
+        filter: &gpui::BackdropFilter,
+        snapshot_slots: &[Option<usize>],
+        live: &'a wgpu::TextureView,
+    ) -> &'a wgpu::TextureView {
+        match filter.source {
+            gpui::BackdropSource::Live => live,
+            gpui::BackdropSource::Snapshot(snapshot) => {
+                snapshot_slots[snapshot].map_or(live, |slot| &self.snapshots[slot])
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1737,8 +1760,14 @@ impl WgpuRendererCore {
         self.atlas.before_frame();
         self.ensure_intermediate_textures(size);
         let blur_targets = scene_has_filters(scene).then(|| {
+            let snapshot_slots = scene.backdrop_snapshot_slots(MAX_BACKDROP_SNAPSHOTS);
+            let snapshots = snapshot_slots
+                .iter()
+                .flatten()
+                .max()
+                .map_or(0, |slot| slot + 1);
             self.reserve_blur_params(scene);
-            self.blur_targets(size)
+            (self.blur_targets(size, snapshots), snapshot_slots)
         });
 
         let gamma_params = GammaParams {
@@ -1773,19 +1802,28 @@ impl WgpuRendererCore {
             bytemuck::bytes_of(&gamma_params),
         );
 
-        self.record_frame(scene, target_view, clear_color, blur_targets.as_ref())
-            .inspect_err(|_| {
-                // Queue writes are staged before encoding; flush them even if the frame fails.
-                self.resources.queue.submit(std::iter::empty());
-            })
+        self.record_frame(
+            scene,
+            target_view,
+            clear_color,
+            blur_targets
+                .as_ref()
+                .map(|(targets, slots)| (targets, slots.as_slice())),
+        )
+        .inspect_err(|_| {
+            // Queue writes are staged before encoding; flush them even if the frame fails.
+            self.resources.queue.submit(std::iter::empty());
+        })
     }
 
+    /// `blur_targets` comes with the slot of each backdrop snapshot, from
+    /// [`Scene::backdrop_snapshot_slots`].
     fn record_frame(
         &mut self,
         scene: &Scene,
         frame_view: &wgpu::TextureView,
         clear_color: wgpu::Color,
-        blur_targets: Option<&BlurTargets>,
+        blur_targets: Option<(&BlurTargets, &[Option<usize>])>,
     ) -> Result<wgpu::SubmissionIndex> {
         let mut instance_offset = 0;
         let instance_bindings = self
@@ -1813,7 +1851,7 @@ impl WgpuRendererCore {
 
         // A scene with filters renders offscreen so filter passes can sample what is already
         // painted, and is copied to the frame at the end.
-        let scene_view = blur_targets.map_or(frame_view, |targets| &targets.scene);
+        let scene_view = blur_targets.map_or(frame_view, |(targets, _)| &targets.scene);
         let mut current_target = scene_view;
         // (boundary, the target to composite back into, whether this level is isolated)
         let mut filter_stack: Vec<(&FilterBoundary, &wgpu::TextureView, bool)> = Vec::new();
@@ -1910,7 +1948,7 @@ impl WgpuRendererCore {
                     // implemented by the WGPU renderer.
                     PrimitiveBatch::Surfaces(_surfaces) => {}
                     PrimitiveBatch::BackdropFilters(range) => {
-                        let Some(targets) = blur_targets else {
+                        let Some((targets, snapshot_slots)) = blur_targets else {
                             continue;
                         };
                         drop(pass);
@@ -1918,7 +1956,7 @@ impl WgpuRendererCore {
                             self.filter_and_composite(
                                 &mut encoder,
                                 targets,
-                                current_target,
+                                targets.backdrop_source(filter, snapshot_slots, current_target),
                                 current_target,
                                 BlurComposite::backdrop(filter),
                             );
@@ -1930,8 +1968,31 @@ impl WgpuRendererCore {
                             wgpu::LoadOp::Load,
                         );
                     }
+                    PrimitiveBatch::BackdropSnapshot(ix) => {
+                        let Some((targets, Some(slot))) =
+                            blur_targets.map(|(targets, slots)| (targets, slots[ix]))
+                        else {
+                            continue;
+                        };
+                        drop(pass);
+                        self.run_blur_pass(
+                            &mut encoder,
+                            "backdrop_snapshot",
+                            &self.resources.pipelines.blur_downsample,
+                            &targets.snapshots[slot],
+                            current_target,
+                            BlurParams::default(),
+                            None,
+                        );
+                        pass = begin_target_pass(
+                            &mut encoder,
+                            "main_pass_continued",
+                            current_target,
+                            wgpu::LoadOp::Load,
+                        );
+                    }
                     PrimitiveBatch::FilterBoundary(ix) => {
-                        let Some(targets) = blur_targets else {
+                        let Some((targets, _)) = blur_targets else {
                             continue;
                         };
                         let boundary = &scene.filter_boundaries[ix];
@@ -1975,7 +2036,7 @@ impl WgpuRendererCore {
             }
         }
 
-        if let Some(targets) = blur_targets {
+        if let Some((targets, _)) = blur_targets {
             self.run_blur_pass(
                 &mut encoder,
                 "scene_blit",
@@ -1994,25 +2055,27 @@ impl WgpuRendererCore {
         Ok(submission)
     }
 
-    fn blur_targets(&mut self, size: Size<DevicePixels>) -> BlurTargets {
-        if let Some(targets) = &self.resources.blur_targets
-            && targets.size == size
-        {
-            return targets.clone();
-        }
+    fn blur_targets(&mut self, size: Size<DevicePixels>, snapshots: usize) -> BlurTargets {
         let device = &self.resources.device;
         let format = self.target_format;
         let (width, height) = (size.width.0 as u32, size.height.0 as u32);
         let view = |width: u32, height: u32| {
             Self::create_path_intermediate(device, format, width, height).1
         };
-        let targets = BlurTargets {
-            size,
-            scene: view(width, height),
-            ping: view(width / 2, height / 2),
-            pong: view(width / 2, height / 2),
-            groups: (0..MAX_FILTER_DEPTH).map(|_| view(width, height)).collect(),
+        let mut targets = match self.resources.blur_targets.take() {
+            Some(targets) if targets.size == size => targets,
+            _ => BlurTargets {
+                size,
+                scene: view(width, height),
+                ping: view(width / 2, height / 2),
+                pong: view(width / 2, height / 2),
+                groups: (0..MAX_FILTER_DEPTH).map(|_| view(width, height)).collect(),
+                snapshots: Vec::new(),
+            },
         };
+        while targets.snapshots.len() < snapshots {
+            targets.snapshots.push(view(width, height));
+        }
         self.resources.blur_targets = Some(targets.clone());
         targets
     }
@@ -2027,10 +2090,11 @@ impl WgpuRendererCore {
     }
 
     /// Make room for every blur pass the scene can record (downsample, two gaussian passes, and
-    /// a composite per filter, plus the final blit) and rewind to the first slot.
+    /// a composite per filter, a copy per backdrop snapshot, plus the final blit) and rewind to
+    /// the first slot.
     fn reserve_blur_params(&mut self, scene: &Scene) {
         let filters = scene.backdrop_filters.len() + scene.filter_boundaries.len().div_ceil(2);
-        let slots = 4 * filters as u64 + 1;
+        let slots = 4 * filters as u64 + scene.backdrop_snapshots.len() as u64 + 1;
         if slots > self.blur_params_slots {
             self.blur_params_slots = slots.next_power_of_two();
             self.resources.blur_params_buffer = Self::create_blur_params_buffer(
@@ -3377,6 +3441,63 @@ mod tests {
         assert_pixel(&image, 24, 16, RED);
         assert_pixel(&image, 40, 16, BLUE);
         assert_pixel(&image, 56, 16, BLUE);
+        Ok(())
+    }
+
+    /// A white page under a half-black scrim, and a frosted panel on the scrim. The panel blurs
+    /// the scrim's tint with the live frame, and the white page with a snapshot taken before
+    /// the scrim. Around the panel the scrim is the same either way.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_backdrop_snapshot_leaves_the_scrim_out_of_the_blur() -> anyhow::Result<()> {
+        fn rect(origin: f32, side: f32) -> Bounds<ScaledPixels> {
+            Bounds {
+                origin: Point {
+                    x: ScaledPixels(origin),
+                    y: ScaledPixels(origin),
+                },
+                size: Size {
+                    width: ScaledPixels(side),
+                    height: ScaledPixels(side),
+                },
+            }
+        }
+
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let mut render = |snapshot: bool| -> anyhow::Result<image::RgbaImage> {
+            let page = rect(0., 64.);
+            let mut scene = Scene::default();
+            scene.insert_primitive(solid_quad(0.0, 0.0, 64.0, 64.0, gpui::white()));
+            if snapshot {
+                scene.push_backdrop_snapshot(page);
+            }
+            scene.insert_primitive(solid_quad(0.0, 0.0, 64.0, 64.0, gpui::black().opacity(0.5)));
+            scene.insert_primitive(gpui::BackdropFilter {
+                bounds: rect(16., 32.),
+                content_mask: ContentMask { bounds: page },
+                filters: smallvec::smallvec![gpui::ScaledFilter::Blur(ScaledPixels(4.))],
+                opacity: 1.,
+                ..Default::default()
+            });
+            if snapshot {
+                scene.pop_backdrop_snapshot();
+            }
+            scene.finish();
+            renderer.render_scene_to_image(&scene, device_size(64, 64))
+        };
+
+        let live = render(false)?;
+        let snapshot = render(true)?;
+        let panel = |image: &image::RgbaImage| image.get_pixel(32, 32).0;
+        let scrim = |image: &image::RgbaImage| image.get_pixel(4, 4).0;
+        assert!(panel(&live)[0] < 200, "live panel: {:?}", panel(&live));
+        assert!(
+            panel(&snapshot)[..3].iter().all(|channel| *channel > 245),
+            "snapshot panel: {:?}",
+            panel(&snapshot)
+        );
+        assert_eq!(scrim(&live), scrim(&snapshot));
+        assert!(scrim(&snapshot)[0] < 200);
         Ok(())
     }
 

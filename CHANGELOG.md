@@ -59,6 +59,11 @@ adds, is new. `mhr-perf` and `mhr-util-macros` end at 0.1.0, since gpui no longe
 - `TitlebarOptions::toolbar_style` opts a macOS 26 window into native toolbar chrome, with the
   larger system corners, through an empty `NSToolbar` in a `WindowToolbarStyle`. It is `None` by
   default. Code that writes out a `TitlebarOptions` adds the field or `..Default::default()`.
+- `Styled::backdrop_snapshot` records the frame before an element paints, and the backdrop
+  filters it and its children paint blur that instead of the live frame, so a frosted panel on a
+  modal's scrim blurs the page and not the scrim's tint. `Window::with_backdrop_snapshot` does
+  the same for custom elements. `BackdropFilter` has a `source`, which code that writes one out
+  sets or takes from `..Default::default()`, and `Style` has `backdrop_snapshot`.
 
 ## 0.1.9
 

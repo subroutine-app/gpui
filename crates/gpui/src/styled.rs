@@ -96,6 +96,17 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Record the frame as it is before this element paints, so that the backdrop filters this
+    /// element and its children paint blur it instead of the live frame. A modal overlay's scrim
+    /// sets it, so that a frosted panel on the scrim blurs the page under the scrim and not the
+    /// scrim's tint. The innermost element with it is the one a filter reads, and what paints
+    /// outside the element, including its [`crate::deferred`] children, reads the live frame.
+    /// See [`crate::Window::with_backdrop_snapshot`].
+    fn backdrop_snapshot(mut self) -> Self {
+        self.style().backdrop_snapshot = Some(true);
+        self
+    }
+
     /// Sets the display type of the element to `block`.
     /// [Docs](https://tailwindcss.com/docs/display)
     fn block(mut self) -> Self {

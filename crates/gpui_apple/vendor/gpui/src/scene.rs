@@ -56,6 +56,11 @@ pub struct Scene {
     pub surfaces: Vec<PaintSurface>,
     pub backdrop_filters: Vec<BackdropFilter>,
     pub filter_boundaries: Vec<FilterBoundary>,
+    /// In draw order, which is the order they were inserted in.
+    pub backdrop_snapshots: Vec<BackdropSnapshot>,
+    /// The snapshots open around what is inserted now, innermost last. `None` stands for one
+    /// that couldn't be taken, inside a layer, so the filters under it read the live frame.
+    backdrop_snapshot_stack: Vec<Option<usize>>,
 }
 
 #[expect(missing_docs)]
@@ -75,6 +80,8 @@ impl Scene {
         self.surfaces.clear();
         self.backdrop_filters.clear();
         self.filter_boundaries.clear();
+        self.backdrop_snapshots.clear();
+        self.backdrop_snapshot_stack.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -100,6 +107,73 @@ impl Scene {
     pub fn raise_order_floor(&mut self) {
         let floor = self.primitive_bounds.max_order() + 1;
         self.primitive_bounds.set_order_floor(floor);
+    }
+
+    /// Records the frame as it is now for the backdrop filters inserted until the matching
+    /// [`Self::pop_backdrop_snapshot`], which read it instead of the live frame. The snapshot
+    /// sorts above everything inserted before it and below everything inserted after it.
+    ///
+    /// Inside a layer, whose primitives share one order, nothing can sort between the frame
+    /// before and after this point, so no snapshot is taken and the filters read the live frame.
+    pub fn push_backdrop_snapshot(&mut self, bounds: Bounds<ScaledPixels>) {
+        self.paint_operations
+            .push(PaintOperation::PushBackdropSnapshot(bounds));
+        if !self.layer_stack.is_empty() {
+            self.backdrop_snapshot_stack.push(None);
+            return;
+        }
+        let bounds = self
+            .effect_stack
+            .last()
+            .map_or(bounds, |effect| shifted(bounds, effect.translation));
+        let order = self.primitive_bounds.insert_above_all(bounds);
+        self.primitive_bounds.set_order_floor(order + 1);
+        self.backdrop_snapshot_stack
+            .push(Some(self.backdrop_snapshots.len()));
+        self.backdrop_snapshots
+            .push(BackdropSnapshot { order, bounds });
+    }
+
+    pub fn pop_backdrop_snapshot(&mut self) {
+        self.backdrop_snapshot_stack.pop();
+        self.paint_operations
+            .push(PaintOperation::PopBackdropSnapshot);
+    }
+
+    fn backdrop_source(&self) -> BackdropSource {
+        match self.backdrop_snapshot_stack.last() {
+            Some(Some(snapshot)) => BackdropSource::Snapshot(*snapshot),
+            Some(None) | None => BackdropSource::Live,
+        }
+    }
+
+    /// The texture each backdrop snapshot is copied into, given `slots` textures: `None` for a
+    /// snapshot no filter reads, which needn't be copied. A texture is free again once the last
+    /// filter that reads its snapshot has drawn. A snapshot that finds every texture taken gets
+    /// `None` too, and the filters that would read it read the live frame. Call after
+    /// [`Self::finish`].
+    pub fn backdrop_snapshot_slots(&self, slots: usize) -> Vec<Option<usize>> {
+        let mut last_reads = vec![None::<DrawOrder>; self.backdrop_snapshots.len()];
+        for filter in &self.backdrop_filters {
+            if let BackdropSource::Snapshot(snapshot) = filter.source {
+                let last_read = &mut last_reads[snapshot];
+                *last_read = Some(last_read.map_or(filter.order, |order| order.max(filter.order)));
+            }
+        }
+
+        let mut free_after = vec![None::<DrawOrder>; slots];
+        self.backdrop_snapshots
+            .iter()
+            .zip(last_reads)
+            .map(|(snapshot, last_read)| {
+                let last_read = last_read?;
+                let slot = free_after
+                    .iter()
+                    .position(|free| free.is_none_or(|order| order < snapshot.order))?;
+                free_after[slot] = Some(last_read);
+                Some(slot)
+            })
+            .collect()
     }
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
@@ -161,7 +235,10 @@ impl Scene {
             Primitive::SubpixelSprite(sprite) => sprite.order = order,
             Primitive::PolychromeSprite(sprite) => sprite.order = order,
             Primitive::Surface(surface) => surface.order = order,
-            Primitive::BackdropFilter(filter) => filter.order = order,
+            Primitive::BackdropFilter(filter) => {
+                filter.order = order;
+                filter.source = self.backdrop_source();
+            }
             Primitive::FilterBoundary(boundary) => {
                 boundary.order = order;
                 if !boundary.is_start {
@@ -246,6 +323,10 @@ impl Scene {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
+                PaintOperation::PushBackdropSnapshot(bounds) => {
+                    self.push_backdrop_snapshot(*bounds)
+                }
+                PaintOperation::PopBackdropSnapshot => self.pop_backdrop_snapshot(),
             }
         }
     }
@@ -269,6 +350,12 @@ impl Scene {
         // the start (false = 0) ahead of the end (true = 1) so the pair stays well-formed.
         self.filter_boundaries
             .sort_by_key(|boundary| (boundary.order, !boundary.is_start));
+        // Each snapshot sorts above everything inserted before it, so they are in draw order
+        // already, and the filters that read them hold their indices.
+        debug_assert!(
+            self.backdrop_snapshots
+                .is_sorted_by_key(|snapshot| snapshot.order)
+        );
     }
 
     #[cfg_attr(
@@ -300,6 +387,8 @@ impl Scene {
             backdrop_filters_iter: self.backdrop_filters.iter().peekable(),
             filter_boundaries_start: 0,
             filter_boundaries_iter: self.filter_boundaries.iter().peekable(),
+            backdrop_snapshots_start: 0,
+            backdrop_snapshots_iter: self.backdrop_snapshots.iter().peekable(),
         }
     }
 }
@@ -313,6 +402,8 @@ impl Scene {
     allow(dead_code)
 )]
 pub(crate) enum PrimitiveKind {
+    // A snapshot's order is its own, so where it sorts at an equal order never matters.
+    BackdropSnapshot,
     // Lowest discriminant: at an equal order, a content-filter group-start is emitted before
     // the group's own content so the renderer redirects rendering before any child draws.
     FilterBoundaryStart,
@@ -335,6 +426,8 @@ pub(crate) enum PaintOperation {
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
+    PushBackdropSnapshot(Bounds<ScaledPixels>),
+    PopBackdropSnapshot,
 }
 
 /// A change to how an element paints that an animation can make without laying the element out
@@ -572,6 +665,8 @@ struct BatchIterator<'a> {
     backdrop_filters_iter: Peekable<slice::Iter<'a, BackdropFilter>>,
     filter_boundaries_start: usize,
     filter_boundaries_iter: Peekable<slice::Iter<'a, FilterBoundary>>,
+    backdrop_snapshots_start: usize,
+    backdrop_snapshots_iter: Peekable<slice::Iter<'a, BackdropSnapshot>>,
 }
 
 impl<'a> Iterator for BatchIterator<'a> {
@@ -618,6 +713,10 @@ impl<'a> Iterator for BatchIterator<'a> {
                     Some(boundary) if boundary.is_start => PrimitiveKind::FilterBoundaryStart,
                     _ => PrimitiveKind::FilterBoundaryEnd,
                 },
+            ),
+            (
+                self.backdrop_snapshots_iter.peek().map(|s| s.order),
+                PrimitiveKind::BackdropSnapshot,
             ),
         ];
         orders_and_kinds.sort_by_key(|(order, kind)| (order.unwrap_or(u32::MAX), *kind));
@@ -788,6 +887,12 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.filter_boundaries_start = index + 1;
                 Some(PrimitiveBatch::FilterBoundary(index))
             }
+            PrimitiveKind::BackdropSnapshot => {
+                let index = self.backdrop_snapshots_start;
+                self.backdrop_snapshots_iter.next();
+                self.backdrop_snapshots_start = index + 1;
+                Some(PrimitiveBatch::BackdropSnapshot(index))
+            }
         }
     }
 }
@@ -825,6 +930,9 @@ pub enum PrimitiveBatch {
     /// `is_start` to tell whether this opens the group (switch render target) or closes it
     /// (filter the offscreen target and composite it back).
     FilterBoundary(usize),
+    /// A backdrop snapshot; index into [`Scene::backdrop_snapshots`]. Copy the current target
+    /// for the backdrop filters that read it.
+    BackdropSnapshot(usize),
 }
 
 impl PrimitiveBatch {
@@ -859,6 +967,7 @@ impl PrimitiveBatch {
             Self::Surfaces(range) => format!("surfaces ({})", range.len()),
             Self::BackdropFilters(range) => format!("backdrop filters ({})", range.len()),
             Self::FilterBoundary(ix) => format!("filter boundary {ix}"),
+            Self::BackdropSnapshot(ix) => format!("backdrop snapshot {ix}"),
         }
     }
 }
@@ -944,12 +1053,36 @@ pub struct BackdropFilter {
     pub filters: SmallVec<[ScaledFilter; 4]>,
     /// Element opacity captured at paint time, multiplied into the composited result.
     pub opacity: f32,
+    /// What the filter reads. The scene sets it when the filter is inserted, from the
+    /// innermost [`Scene::push_backdrop_snapshot`] open around it.
+    pub source: BackdropSource,
 }
 
 impl From<BackdropFilter> for Primitive {
     fn from(filter: BackdropFilter) -> Self {
         Primitive::BackdropFilter(filter)
     }
+}
+
+/// What a [`BackdropFilter`] blurs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BackdropSource {
+    /// The frame as painted up to the filter.
+    #[default]
+    Live,
+    /// The frame as it was at a snapshot, an index into [`Scene::backdrop_snapshots`].
+    Snapshot(usize),
+}
+
+/// A point in the draw order where the renderer copies the frame, for the backdrop filters
+/// that read it ([`BackdropSource::Snapshot`]). Emitted by [`crate::Window::with_backdrop_snapshot`].
+#[derive(Clone, Copy, Debug)]
+#[expect(missing_docs)]
+pub struct BackdropSnapshot {
+    pub order: DrawOrder,
+    /// The bounds of the element that took it. The renderer copies the whole frame, since a
+    /// blur reads around what it covers.
+    pub bounds: Bounds<ScaledPixels>,
 }
 
 /// The start or end marker of a content-filter (`filter`) isolation group. The element's
@@ -1962,6 +2095,7 @@ mod filter_tests {
                         "end"
                     }
                 }
+                PrimitiveBatch::BackdropSnapshot(_) => "snapshot",
                 _ => "other",
             })
             .collect()
@@ -2032,5 +2166,152 @@ mod filter_tests {
         scene.insert_primitive(quad());
 
         assert_eq!(batch_kinds(&mut scene), vec!["quad", "backdrop", "quad"]);
+    }
+
+    fn sources(scene: &Scene) -> Vec<BackdropSource> {
+        scene
+            .backdrop_filters
+            .iter()
+            .map(|filter| filter.source)
+            .collect()
+    }
+
+    #[test]
+    fn a_snapshot_keeps_the_scrim_from_the_filters_under_it() {
+        let mut scene = Scene::default();
+        // The page.
+        scene.insert_primitive(quad());
+        // The overlay: its snapshot, its scrim, and a frosted panel on the scrim.
+        scene.push_backdrop_snapshot(full_bounds());
+        scene.insert_primitive(quad());
+        scene.insert_primitive(backdrop());
+        scene.insert_primitive(quad());
+        scene.pop_backdrop_snapshot();
+
+        assert_eq!(
+            batch_kinds(&mut scene),
+            vec!["quad", "snapshot", "quad", "backdrop", "quad"]
+        );
+        assert_eq!(sources(&scene), vec![BackdropSource::Snapshot(0)]);
+    }
+
+    #[test]
+    fn content_after_a_snapshot_sorts_above_it() {
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad());
+        scene.push_backdrop_snapshot(full_bounds());
+        // Painted after the snapshot without overlapping anything, so without the floor it
+        // would take the lowest order and be drawn into the copy.
+        scene.insert_primitive(detached_quad());
+        scene.pop_backdrop_snapshot();
+
+        assert_eq!(batch_kinds(&mut scene), vec!["quad", "snapshot", "quad"]);
+    }
+
+    #[test]
+    fn filters_outside_a_snapshot_read_the_live_frame() {
+        let mut scene = Scene::default();
+        scene.insert_primitive(backdrop());
+        scene.push_backdrop_snapshot(full_bounds());
+        scene.insert_primitive(quad());
+        scene.pop_backdrop_snapshot();
+        // A sibling painted after the overlay.
+        scene.insert_primitive(backdrop());
+        // What the overlay deferred, painted after the main scene.
+        scene.raise_order_floor();
+        scene.insert_primitive(backdrop());
+
+        assert_eq!(sources(&scene), vec![BackdropSource::Live; 3]);
+    }
+
+    #[test]
+    fn a_filter_reads_the_innermost_snapshot() {
+        let mut scene = Scene::default();
+        scene.push_backdrop_snapshot(full_bounds());
+        scene.insert_primitive(quad());
+        scene.push_backdrop_snapshot(full_bounds());
+        scene.insert_primitive(quad());
+        scene.insert_primitive(backdrop());
+        scene.pop_backdrop_snapshot();
+        scene.insert_primitive(backdrop());
+        scene.pop_backdrop_snapshot();
+
+        // The two filters draw one after the other, in one batch.
+        assert_eq!(
+            batch_kinds(&mut scene),
+            vec!["snapshot", "quad", "snapshot", "quad", "backdrop"]
+        );
+        assert_eq!(
+            sources(&scene),
+            vec![BackdropSource::Snapshot(1), BackdropSource::Snapshot(0)]
+        );
+    }
+
+    #[test]
+    fn a_snapshot_inside_a_layer_is_not_taken() {
+        let mut scene = Scene::default();
+        scene.push_layer(full_bounds());
+        scene.push_backdrop_snapshot(full_bounds());
+        scene.insert_primitive(backdrop());
+        scene.pop_backdrop_snapshot();
+        scene.pop_layer();
+
+        assert!(scene.backdrop_snapshots.is_empty());
+        assert_eq!(sources(&scene), vec![BackdropSource::Live]);
+    }
+
+    #[test]
+    fn a_replayed_filter_reads_the_snapshot_of_the_frame_it_is_replayed_into() {
+        let mut previous = Scene::default();
+        previous.push_backdrop_snapshot(full_bounds());
+        previous.insert_primitive(quad());
+        previous.insert_primitive(backdrop());
+        previous.pop_backdrop_snapshot();
+
+        let mut scene = Scene::default();
+        scene.push_backdrop_snapshot(full_bounds());
+        scene.pop_backdrop_snapshot();
+        scene.replay(0..previous.len(), &previous);
+        // A cached view drawn again under a snapshot this frame takes.
+        scene.push_backdrop_snapshot(full_bounds());
+        scene.replay(2..3, &previous);
+        scene.pop_backdrop_snapshot();
+
+        assert_eq!(
+            sources(&scene),
+            vec![BackdropSource::Snapshot(1), BackdropSource::Snapshot(2)]
+        );
+    }
+
+    #[test]
+    fn snapshots_share_a_texture_once_their_filters_have_drawn() {
+        let mut scene = Scene::default();
+        // Read by nothing.
+        scene.push_backdrop_snapshot(full_bounds());
+        scene.pop_backdrop_snapshot();
+        // Two overlays one after the other.
+        for _ in 0..2 {
+            scene.push_backdrop_snapshot(full_bounds());
+            scene.insert_primitive(backdrop());
+            scene.pop_backdrop_snapshot();
+        }
+        // Two nested ones, both read after the inner one is taken.
+        scene.push_backdrop_snapshot(full_bounds());
+        scene.push_backdrop_snapshot(full_bounds());
+        scene.insert_primitive(backdrop());
+        scene.pop_backdrop_snapshot();
+        scene.insert_primitive(backdrop());
+        scene.pop_backdrop_snapshot();
+        scene.finish();
+
+        assert_eq!(
+            scene.backdrop_snapshot_slots(2),
+            vec![None, Some(0), Some(0), Some(0), Some(1)]
+        );
+        // With one texture, the inner one finds it taken.
+        assert_eq!(
+            scene.backdrop_snapshot_slots(1),
+            vec![None, Some(0), Some(0), Some(0), None]
+        );
     }
 }

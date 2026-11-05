@@ -32,6 +32,10 @@ const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 /// Content-filter nesting levels that get their own isolated group target; deeper nests render
 /// inline. Must match the Metal and wgpu backends so nested blur renders consistently.
 const MAX_FILTER_DEPTH: usize = 2;
+/// Backdrop snapshots that can hold a copy of the frame at once, each a full-resolution target
+/// made the first time a frame needs it. A filter whose snapshot finds none free reads the live
+/// frame. Must match the Metal and wgpu backends.
+const MAX_BACKDROP_SNAPSHOTS: usize = 4;
 /// Constant-buffer slot of `BlurParams` in `shaders.hlsl`. Slot 1 holds the per-frame
 /// `BatchParams` binding, which instanced draws rely on and never rebind.
 const BLUR_PARAMS_SLOT: u32 = 2;
@@ -197,15 +201,17 @@ struct DirectXResources {
 }
 
 /// Offscreen render targets for filters. The scene renders into `scene` so filters can sample
-/// it, `ping`/`pong` are half-resolution scratch for the separable gaussian, and `groups` holds
-/// one target per isolated content-filter nesting level, up to [`MAX_FILTER_DEPTH`]. The views
-/// keep their textures alive.
+/// it, `ping`/`pong` are half-resolution scratch for the separable gaussian, `groups` holds
+/// one target per isolated content-filter nesting level, up to [`MAX_FILTER_DEPTH`], and
+/// `snapshots` the copies of the frame that backdrop filters read, as many as a frame has
+/// needed. The views keep their textures alive.
 #[derive(Clone)]
 struct BlurResources {
     scene: RenderTarget,
     ping: RenderTarget,
     pong: RenderTarget,
     groups: Vec<RenderTarget>,
+    snapshots: Vec<RenderTarget>,
 }
 
 impl BlurResources {
@@ -218,11 +224,27 @@ impl BlurResources {
             groups: (0..MAX_FILTER_DEPTH)
                 .map(|_| create_color_target(device, width, height))
                 .collect::<Result<_>>()?,
+            snapshots: Vec::new(),
         })
     }
 
     fn group(&self, depth: usize) -> Option<RenderTarget> {
         self.groups.get(depth).cloned()
+    }
+
+    /// The view a backdrop filter reads, given the slots of the frame's snapshots.
+    fn backdrop_source<'a>(
+        &'a self,
+        filter: &BackdropFilter,
+        snapshot_slots: &[Option<usize>],
+        live: &'a Option<ID3D11ShaderResourceView>,
+    ) -> &'a Option<ID3D11ShaderResourceView> {
+        match filter.source {
+            BackdropSource::Live => live,
+            BackdropSource::Snapshot(snapshot) => {
+                snapshot_slots[snapshot].map_or(live, |slot| &self.snapshots[slot].srv)
+            }
+        }
     }
 }
 
@@ -572,6 +594,17 @@ impl DirectXRenderer {
 
         // Filters sample already-painted content, so a scene with filters renders into an
         // offscreen target and is copied to the swap chain at the end.
+        let snapshot_slots = if scene_has_filters(scene) {
+            scene.backdrop_snapshot_slots(MAX_BACKDROP_SNAPSHOTS)
+        } else {
+            Vec::new()
+        };
+        let snapshots = snapshot_slots
+            .iter()
+            .flatten()
+            .max()
+            .map_or(0, |slot| slot + 1);
+        self.ensure_backdrop_snapshots(snapshots)?;
         let resources = self.resources.as_ref().context("resources missing")?;
         let swap_chain_target = resources.render_target_view.clone();
         let blur = scene_has_filters(scene).then(|| resources.blur.clone());
@@ -625,14 +658,28 @@ impl DirectXRenderer {
                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
                 PrimitiveBatch::BackdropFilters(range) => {
                     let result = scene.backdrop_filters[range].iter().try_for_each(|filter| {
+                        let source = match &blur {
+                            Some(blur) => blur.backdrop_source(filter, &snapshot_slots, &current.srv),
+                            None => &current.srv,
+                        };
                         self.dx_filter_and_composite(
-                            &current.srv,
+                            source,
                             &current.rtv,
                             BlurComposite::backdrop(filter),
                         )
                     });
                     current.bind(&device_context, None);
                     result
+                }
+                PrimitiveBatch::BackdropSnapshot(ix) => {
+                    match (&blur, snapshot_slots.get(ix).copied().flatten()) {
+                        (Some(blur), Some(slot)) => {
+                            let result = self.dx_blit(&current.srv, &blur.snapshots[slot].rtv);
+                            current.bind(&device_context, None);
+                            result
+                        }
+                        _ => Ok(()),
+                    }
                 }
                 PrimitiveBatch::FilterBoundary(ix) => {
                     let boundary = &scene.filter_boundaries[ix];
@@ -1281,7 +1328,8 @@ impl DirectXRenderer {
         Ok(())
     }
 
-    /// Copy the offscreen scene into the swap chain's render target.
+    /// Copy `source` into `target` at full resolution: the offscreen scene into the swap chain's
+    /// render target, or the frame into a backdrop snapshot.
     fn dx_blit(
         &self,
         source: &Option<ID3D11ShaderResourceView>,
@@ -1305,6 +1353,18 @@ impl DirectXRenderer {
             true,
         )
     }
+    /// Make the backdrop snapshot targets a frame needs that earlier frames haven't made.
+    fn ensure_backdrop_snapshots(&mut self, count: usize) -> Result<()> {
+        let (width, height) = (self.width, self.height);
+        let device = &self.devices.as_ref().context("devices missing")?.device;
+        let blur = &mut self.resources.as_mut().context("resources missing")?.blur;
+        while blur.snapshots.len() < count {
+            blur.snapshots
+                .push(create_color_target(device, width, height)?);
+        }
+        Ok(())
+    }
+
     pub(crate) fn gpu_specs(&self) -> Result<GpuSpecs> {
         let devices = self.devices.as_ref().context("devices missing")?;
         let desc = unsafe { devices.adapter.GetDesc1() }?;
