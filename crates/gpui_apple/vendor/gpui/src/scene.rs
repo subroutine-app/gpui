@@ -58,8 +58,9 @@ pub struct Scene {
     pub filter_boundaries: Vec<FilterBoundary>,
     /// In draw order, which is the order they were inserted in.
     pub backdrop_snapshots: Vec<BackdropSnapshot>,
-    /// The snapshots open around what is inserted now, innermost last. `None` stands for one
-    /// that couldn't be taken, inside a layer, so the filters under it read the live frame.
+    /// The snapshots open around what is inserted now, innermost last, where a push that
+    /// found one open repeats it. `None` stands for one that couldn't be taken, inside a layer,
+    /// so the filters under it read the live frame.
     backdrop_snapshot_stack: Vec<Option<usize>>,
 }
 
@@ -118,9 +119,28 @@ impl Scene {
     pub fn push_backdrop_snapshot(&mut self, bounds: Bounds<ScaledPixels>) {
         self.paint_operations
             .push(PaintOperation::PushBackdropSnapshot(bounds));
+        let snapshot = self.take_backdrop_snapshot(bounds);
+        self.backdrop_snapshot_stack.push(snapshot);
+    }
+
+    /// Like [`Self::push_backdrop_snapshot`], unless a snapshot is open already: then the
+    /// filters inserted until the matching [`Self::pop_backdrop_snapshot`] read that one, which
+    /// was taken before anything inserted since. An element's drop shadows go under it, so that
+    /// its own backdrop filter doesn't blur them, and an open snapshot already leaves them out.
+    /// Decided when inserted, so a replayed view decides again in the frame it is replayed into.
+    pub fn push_backdrop_snapshot_unless_open(&mut self, bounds: Bounds<ScaledPixels>) {
+        self.paint_operations
+            .push(PaintOperation::PushBackdropSnapshotUnlessOpen(bounds));
+        let snapshot = match self.backdrop_snapshot_stack.last() {
+            Some(Some(open)) => Some(*open),
+            Some(None) | None => self.take_backdrop_snapshot(bounds),
+        };
+        self.backdrop_snapshot_stack.push(snapshot);
+    }
+
+    fn take_backdrop_snapshot(&mut self, bounds: Bounds<ScaledPixels>) -> Option<usize> {
         if !self.layer_stack.is_empty() {
-            self.backdrop_snapshot_stack.push(None);
-            return;
+            return None;
         }
         let bounds = self
             .effect_stack
@@ -128,10 +148,9 @@ impl Scene {
             .map_or(bounds, |effect| shifted(bounds, effect.translation));
         let order = self.primitive_bounds.insert_above_all(bounds);
         self.primitive_bounds.set_order_floor(order + 1);
-        self.backdrop_snapshot_stack
-            .push(Some(self.backdrop_snapshots.len()));
         self.backdrop_snapshots
             .push(BackdropSnapshot { order, bounds });
+        Some(self.backdrop_snapshots.len() - 1)
     }
 
     pub fn pop_backdrop_snapshot(&mut self) {
@@ -326,6 +345,9 @@ impl Scene {
                 PaintOperation::PushBackdropSnapshot(bounds) => {
                     self.push_backdrop_snapshot(*bounds)
                 }
+                PaintOperation::PushBackdropSnapshotUnlessOpen(bounds) => {
+                    self.push_backdrop_snapshot_unless_open(*bounds)
+                }
                 PaintOperation::PopBackdropSnapshot => self.pop_backdrop_snapshot(),
             }
         }
@@ -427,6 +449,7 @@ pub(crate) enum PaintOperation {
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
     PushBackdropSnapshot(Bounds<ScaledPixels>),
+    PushBackdropSnapshotUnlessOpen(Bounds<ScaledPixels>),
     PopBackdropSnapshot,
 }
 
@@ -2087,6 +2110,7 @@ mod filter_tests {
             .batches()
             .map(|batch| match batch {
                 PrimitiveBatch::Quads(_) => "quad",
+                PrimitiveBatch::Shadows(_) => "shadow",
                 PrimitiveBatch::BackdropFilters(_) => "backdrop",
                 PrimitiveBatch::FilterBoundary(ix) => {
                     if scene.filter_boundaries[ix].is_start {
@@ -2312,6 +2336,134 @@ mod filter_tests {
         assert_eq!(
             scene.backdrop_snapshot_slots(1),
             vec![None, Some(0), Some(0), Some(0), None]
+        );
+    }
+
+    fn drop_shadow(
+        bounds: Bounds<ScaledPixels>,
+        content_mask: ContentMask<ScaledPixels>,
+    ) -> Shadow {
+        Shadow {
+            order: 0,
+            blur_radius: sp(8.0),
+            bounds,
+            content_mask,
+            corner_radii: Corners::default(),
+            color: crate::black().opacity(0.4),
+            element_bounds: bounds,
+            element_corner_radii: Corners::default(),
+            inset: 0,
+            pad: 0,
+        }
+    }
+
+    /// What `Window::paint_drop_shadows_and_backdrop_filter` inserts for a frosted element
+    /// with a drop shadow, followed by the element's tint.
+    fn shadowed_glass(
+        scene: &mut Scene,
+        bounds: Bounds<ScaledPixels>,
+        mask: ContentMask<ScaledPixels>,
+    ) {
+        scene.push_backdrop_snapshot_unless_open(bounds);
+        scene.insert_primitive(drop_shadow(bounds, mask));
+        scene.insert_primitive(BackdropFilter {
+            bounds,
+            content_mask: mask,
+            ..backdrop()
+        });
+        scene.pop_backdrop_snapshot();
+        scene.insert_primitive(Quad {
+            bounds,
+            content_mask: mask,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn an_element_blurs_the_frame_from_before_its_own_shadow() {
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad());
+        shadowed_glass(&mut scene, full_bounds(), mask());
+
+        assert_eq!(
+            batch_kinds(&mut scene),
+            vec!["quad", "snapshot", "shadow", "backdrop", "quad"]
+        );
+        assert_eq!(sources(&scene), vec![BackdropSource::Snapshot(0)]);
+    }
+
+    #[test]
+    fn an_element_on_a_scrim_reads_the_scrims_snapshot() {
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad());
+        scene.push_backdrop_snapshot(full_bounds());
+        scene.insert_primitive(quad());
+        shadowed_glass(&mut scene, full_bounds(), mask());
+        scene.pop_backdrop_snapshot();
+
+        assert_eq!(
+            batch_kinds(&mut scene),
+            vec!["quad", "snapshot", "quad", "shadow", "backdrop", "quad"]
+        );
+        assert_eq!(scene.backdrop_snapshots.len(), 1);
+        assert_eq!(sources(&scene), vec![BackdropSource::Snapshot(0)]);
+    }
+
+    #[test]
+    fn a_row_of_shadowed_glass_shares_one_texture() {
+        let row = ContentMask {
+            bounds: Bounds {
+                origin: Point::default(),
+                size: Size {
+                    width: sp(400.0),
+                    height: sp(40.0),
+                },
+            },
+        };
+        let mut scene = Scene::default();
+        scene.insert_primitive(Quad {
+            bounds: row.bounds,
+            content_mask: row,
+            ..Default::default()
+        });
+        for ix in 0..8 {
+            let button = Bounds {
+                origin: Point {
+                    x: sp(ix as f32 * 48.0 + 4.0),
+                    y: sp(4.0),
+                },
+                size: Size {
+                    width: sp(32.0),
+                    height: sp(32.0),
+                },
+            };
+            shadowed_glass(&mut scene, button, row);
+        }
+        scene.finish();
+
+        assert_eq!(
+            sources(&scene),
+            (0..8).map(BackdropSource::Snapshot).collect::<Vec<_>>()
+        );
+        assert_eq!(scene.backdrop_snapshot_slots(1), vec![Some(0); 8]);
+    }
+
+    #[test]
+    fn a_replayed_element_takes_its_own_snapshot_only_where_none_is_open() {
+        let mut previous = Scene::default();
+        shadowed_glass(&mut previous, full_bounds(), mask());
+
+        let mut scene = Scene::default();
+        scene.replay(0..previous.len(), &previous);
+        // The same cached view, drawn again on a scrim.
+        scene.push_backdrop_snapshot(full_bounds());
+        scene.replay(0..previous.len(), &previous);
+        scene.pop_backdrop_snapshot();
+
+        assert_eq!(scene.backdrop_snapshots.len(), 2);
+        assert_eq!(
+            sources(&scene),
+            vec![BackdropSource::Snapshot(0), BackdropSource::Snapshot(1)]
         );
     }
 }

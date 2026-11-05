@@ -5340,6 +5340,42 @@ impl Window {
         });
     }
 
+    /// Paint an element's drop shadows from `shadows`, as [`Self::paint_drop_shadows`] does,
+    /// and then its backdrop filter, as [`Self::paint_backdrop_filter`] does, so that the filter
+    /// doesn't blur the shadows: a drop shadow is drawn under the element as well as around it,
+    /// and a dark one would show through frosted glass. When both are visible the filter reads
+    /// a backdrop snapshot taken before the shadows, or the one open around it, which was taken
+    /// before them too (see [`Self::with_backdrop_snapshot`]). Otherwise nothing is copied.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_drop_shadows_and_backdrop_filter(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        shadows: &[BoxShadow],
+        filters: &[Filter],
+    ) {
+        self.invalidator.debug_assert_paint();
+
+        let casts_shadow = shadows
+            .iter()
+            .any(|shadow| !shadow.inset && !shadow.color.is_transparent());
+        let filters_backdrop = filters.iter().any(|filter| !filter.is_identity());
+        if !(casts_shadow && filters_backdrop) {
+            self.paint_drop_shadows(bounds, corner_radii, shadows);
+            self.paint_backdrop_filter(bounds, corner_radii, filters);
+            return;
+        }
+
+        let snapshot_bounds = self.snap_bounds(bounds);
+        self.next_frame
+            .scene
+            .push_backdrop_snapshot_unless_open(snapshot_bounds);
+        self.paint_drop_shadows(bounds, corner_radii, shadows);
+        self.paint_backdrop_filter(bounds, corner_radii, filters);
+        self.next_frame.scene.pop_backdrop_snapshot();
+    }
+
     /// Isolate the painting performed by `f` into a content-filter group: the renderer renders
     /// everything `f` paints into an offscreen target, blurs it as a single layer, and
     /// composites the result back into the rounded rectangle described by `bounds` and
@@ -9630,6 +9666,71 @@ mod tests {
                     crate::BackdropSource::Snapshot(0),
                     crate::BackdropSource::Live,
                     crate::BackdropSource::Live
+                ]
+            );
+        });
+    }
+
+    /// A frosted element with a drop shadow blurs the frame from before its shadow, which is
+    /// drawn under it too, and one on a scrim reads the scrim's snapshot instead of taking
+    /// another. An element without a shadow or without a blur takes none.
+    #[gpui::test]
+    fn frosted_elements_blur_the_frame_from_before_their_own_shadows(cx: &mut TestAppContext) {
+        struct Glass;
+
+        fn shadow(alpha: f32) -> Vec<crate::BoxShadow> {
+            vec![
+                crate::BoxShadow::new(px(0.), px(2.), crate::black().opacity(alpha))
+                    .blur_radius(px(8.)),
+            ]
+        }
+
+        impl Render for Glass {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let frosted = |side: f32| div().size(px(side)).backdrop_blur(px(8.));
+                div()
+                    .size(px(200.))
+                    .flex()
+                    .bg(crate::white())
+                    .child(frosted(20.).shadow(shadow(0.5)))
+                    .child(frosted(24.))
+                    .child(div().size(px(20.)).shadow(shadow(0.3)))
+                    .child(
+                        div()
+                            .absolute()
+                            .size_full()
+                            .backdrop_snapshot()
+                            .bg(crate::black().opacity(0.4))
+                            .child(frosted(28.).shadow(shadow(0.6))),
+                    )
+            }
+        }
+
+        let (_, cx) = cx.add_window_view(|_, _| Glass);
+        cx.run_until_parked();
+        cx.update(|window, _| {
+            let scene = window.rendered_scene();
+            assert_eq!(scene.backdrop_snapshots.len(), 2);
+            let own_snapshot = scene.backdrop_snapshots[0].order;
+            let own_shadow = scene
+                .shadows
+                .iter()
+                .find(|shadow| shadow.color == crate::black().opacity(0.5))
+                .expect("the shadow is painted");
+            assert!(own_snapshot < own_shadow.order);
+
+            let mut filters = scene.backdrop_filters.iter().collect::<Vec<_>>();
+            filters.sort_by(|a, b| a.bounds.size.width.0.total_cmp(&b.bounds.size.width.0));
+            assert!(own_shadow.order < filters[0].order);
+            assert_eq!(
+                filters
+                    .iter()
+                    .map(|filter| filter.source)
+                    .collect::<Vec<_>>(),
+                [
+                    crate::BackdropSource::Snapshot(0),
+                    crate::BackdropSource::Live,
+                    crate::BackdropSource::Snapshot(1)
                 ]
             );
         });

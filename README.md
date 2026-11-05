@@ -9,7 +9,7 @@ siblings, at 0.2.0) and Mesa's changes, and adds:
 - blur of an element and of what is behind it (`Styled::blur`, `Styled::backdrop_blur`), and
   faded edges (`Styled::fade_edges`), on Metal, wgpu and DirectX
 - backdrop snapshots, so that glass on a modal's scrim blurs the page under the scrim
-  (`Styled::backdrop_snapshot`)
+  (`Styled::backdrop_snapshot`), and glass doesn't blur its own drop shadow
 - eased wheel notches and animated scrolling (`ScrollHandle::set_offset_animated`,
   `ListState::scroll_to_reveal_item_animated` and others)
 - drags that wait for a held press (`drag_hold`)

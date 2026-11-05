@@ -76,7 +76,8 @@ pub trait Styled: Sized {
 
     /// Blur the content rendered behind this element — a frosted-glass effect — like CSS
     /// `backdrop-filter: blur(<radius>)`. Typically paired with a translucent [`Styled::bg`]
-    /// so the background tints the blurred backdrop.
+    /// so the background tints the blurred backdrop. The blur leaves out the element's own drop
+    /// shadows ([`Styled::shadow`]), which are drawn under it as well as around it.
     ///
     /// *Appends* to the element's backdrop-filter chain. To replace the whole chain, use
     /// [`Styled::backdrop_filter`].

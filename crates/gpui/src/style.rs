@@ -803,13 +803,15 @@ impl Style {
             .to_pixels(rem_size)
             .clamp_radii_for_quad_size(bounds.size);
 
-        window.paint_drop_shadows(bounds, corner_radii, &self.box_shadow);
-
         // Blur the content behind this element before its (typically translucent) background
         // is painted on top, so the background tints the frosted backdrop (CSS `backdrop-filter`).
-        if !self.backdrop_filter.is_empty() {
-            window.paint_backdrop_filter(bounds, corner_radii, &self.backdrop_filter);
-        }
+        // The blur leaves out the element's own drop shadows, which are drawn under it too.
+        window.paint_drop_shadows_and_backdrop_filter(
+            bounds,
+            corner_radii,
+            &self.box_shadow,
+            &self.backdrop_filter,
+        );
 
         // The element's own box — background, inset shadows, children, and border — painted as a
         // unit. A `filter` (CSS `filter`) wraps this whole unit so the renderer blurs the element

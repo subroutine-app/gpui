@@ -2684,6 +2684,77 @@ mod tests {
         Ok(())
     }
 
+    /// A white page and a frosted panel tinted white with a dark drop shadow, which is drawn
+    /// under the panel too. Blurring the live frame turns the panel grey; blurring a snapshot
+    /// taken before the shadow keeps it white. Around the panel the shadow is the same.
+    #[test]
+    fn a_frosted_panel_leaves_its_own_shadow_out_of_the_blur() -> Result<()> {
+        fn rect(origin: f32, side: f32) -> Bounds<ScaledPixels> {
+            Bounds {
+                origin: point(ScaledPixels(origin), ScaledPixels(origin)),
+                size: size(ScaledPixels(side), ScaledPixels(side)),
+            }
+        }
+        fn fill(bounds: Bounds<ScaledPixels>, color: gpui::Hsla) -> gpui::Quad {
+            gpui::Quad {
+                bounds,
+                content_mask: ContentMask { bounds },
+                background: color.into(),
+                ..Default::default()
+            }
+        }
+
+        let mut renderer = MetalRenderer::new_headless(Default::default())?;
+        let mut render = |snapshot: bool| -> Result<RgbaImage> {
+            let page = rect(0., 64.);
+            let panel = rect(16., 32.);
+            let mut scene = Scene::default();
+            scene.insert_primitive(fill(page, gpui::white()));
+            if snapshot {
+                scene.push_backdrop_snapshot_unless_open(panel);
+            }
+            scene.insert_primitive(gpui::Shadow {
+                order: 0,
+                blur_radius: ScaledPixels(4.),
+                bounds: panel.dilate(ScaledPixels(4.)),
+                content_mask: ContentMask { bounds: page },
+                corner_radii: Default::default(),
+                color: gpui::black().opacity(0.8),
+                element_bounds: panel,
+                element_corner_radii: Default::default(),
+                inset: 0,
+                pad: 0,
+            });
+            scene.insert_primitive(BackdropFilter {
+                bounds: panel,
+                content_mask: ContentMask { bounds: page },
+                filters: smallvec::smallvec![ScaledFilter::Blur(ScaledPixels(4.))],
+                opacity: 1.,
+                ..Default::default()
+            });
+            if snapshot {
+                scene.pop_backdrop_snapshot();
+            }
+            scene.insert_primitive(fill(panel, gpui::white().opacity(0.5)));
+            scene.finish();
+            renderer.render_scene_to_image(&scene, size(DevicePixels(64), DevicePixels(64)))
+        };
+
+        let live = render(false)?;
+        let snapshot = render(true)?;
+        let panel = |image: &RgbaImage| image.get_pixel(32, 32).0;
+        let shadow = |image: &RgbaImage| image.get_pixel(32, 50).0;
+        assert!(panel(&live)[0] < 230, "live panel: {:?}", panel(&live));
+        assert!(
+            panel(&snapshot)[..3].iter().all(|channel| *channel > 245),
+            "snapshot panel: {:?}",
+            panel(&snapshot)
+        );
+        assert_eq!(shadow(&live), shadow(&snapshot));
+        assert!(shadow(&snapshot)[0] < 200);
+        Ok(())
+    }
+
     #[test]
     fn display_link_mode_consumes_and_clears_drawables() -> Result<()> {
         let mut renderer = MetalRenderer::new(Default::default(), false, false)?;

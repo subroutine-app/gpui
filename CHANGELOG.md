@@ -64,6 +64,12 @@ adds, is new. `mhr-perf` and `mhr-util-macros` end at 0.1.0, since gpui no longe
   modal's scrim blurs the page and not the scrim's tint. `Window::with_backdrop_snapshot` does
   the same for custom elements. `BackdropFilter` has a `source`, which code that writes one out
   sets or takes from `..Default::default()`, and `Style` has `backdrop_snapshot`.
+- An element's backdrop filter no longer blurs the element's own drop shadows, which are drawn
+  under it as well as around it, so a frosted button or toolbar with a shadow no longer shows a
+  dark smudge through its glass. When an element has both, it takes a backdrop snapshot before
+  its shadows unless one is open around it already, and a frame copies only for those.
+  `Window::paint_drop_shadows_and_backdrop_filter` does the same for custom elements, and
+  `Scene::push_backdrop_snapshot_unless_open` is the scene's part.
 
 ## 0.1.9
 

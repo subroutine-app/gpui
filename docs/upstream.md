@@ -567,6 +567,28 @@ copy of the gpui-pre 0.3.11 crates first, and they are ported here onto the fork
   and a deferred one, and `metal_renderer.rs` and `wgpu_renderer.rs` (on Linux) render a white
   page under a half-black scrim and check that a panel blurs the page. `mhr-gpui-apple`'s copies
   of `scene.rs` and `window.rs` under `vendor/gpui` follow them.
+- **Backdrop filters leave out the element's own drop shadows**, in `mhr-gpui`'s
+  `src/scene.rs`, `src/window.rs`, `src/style.rs` and `src/styled.rs`. A drop shadow is drawn
+  under its element as well as around it, and `Style::paint` painted it before the element's
+  backdrop filter, so frosted glass with a shadow, such as a toolbar's buttons, blurred its own
+  shadow and showed a dark smudge. `Style::paint` now calls
+  `Window::paint_drop_shadows_and_backdrop_filter`, which, when the element has a visible drop
+  shadow and a backdrop filter that isn't the identity, brackets the two with
+  `Scene::push_backdrop_snapshot_unless_open` and `Scene::pop_backdrop_snapshot`. That push takes
+  a snapshot as `Scene::push_backdrop_snapshot` does, unless one is open, which an ancestor took
+  before anything it painted, the shadow included; then the bracket repeats it on the scene's
+  stack, and the filter reads the ancestor's, which also leaves out a scrim. It is a paint
+  operation of its own, `PaintOperation::PushBackdropSnapshotUnlessOpen`, so a replayed view
+  decides again in the frame it is replayed into. The bracket closes after the element's own
+  filter, so its children read what their ancestors open, as before. An element without a shadow
+  or without a blur takes no snapshot, and the renderers don't change: each such snapshot is read
+  only by the filter right after it, before the next sibling's is taken, so a row of them shares
+  one texture of the four. The tests in `filter_tests` check the order of the snapshot, shadow
+  and filter, that a scrim's snapshot is read instead of another, a row of eight siblings on one
+  texture and replay, a test in `window.rs` checks elements with and without a shadow or a blur
+  and one on a scrim, and `metal_renderer.rs` renders a white-tinted frosted panel over its own
+  dark shadow and checks that the panel stays white. `mhr-gpui-apple`'s copies of `scene.rs` and
+  `window.rs` under `vendor/gpui` follow them.
 
 GPUI Kit's vendored copy also carried paint animations, a modifier observer and glyph colors at
 paint time, which it ported from Mesa Hills Research's `mhr-gpui` 0.1.9. This fork keeps Mesa's
