@@ -1,3 +1,4 @@
+// Modified by Subroutine, as docs/upstream.md in subroutine-app/gpui describes.
 //! Touch gesture recognition vocabulary.
 //!
 //! GPUI recognizes gestures from raw [`TouchEvent`](crate::TouchEvent)s using
@@ -20,6 +21,10 @@ use crate::{
 };
 
 const SCROLL_EVENT_SEPARATION: Duration = Duration::from_millis(28);
+/// How long a coarse wheel notch takes to reach its target offset.
+pub(crate) const COARSE_SCROLL_DURATION: Duration = Duration::from_millis(80);
+/// How long an animated programmatic scroll takes to reach its target offset.
+pub(crate) const ANIMATED_SCROLL_DURATION: Duration = Duration::from_millis(200);
 
 fn dominant_axis(delta: Point<Pixels>) -> Axis {
     if delta.x.abs() <= delta.y.abs() {
@@ -101,6 +106,137 @@ impl OngoingScroll {
             lock_delta_to_axis(delta, axis);
         }
     }
+}
+
+/// A short, interruptible ease-out transition toward a scroll target.
+///
+/// Pixel deltas already carry the high-resolution motion supplied by a trackpad
+/// or touch gesture. Line deltas arrive as coarse wheel notches, so scrollable
+/// elements feed those through this transition and consume one incremental
+/// pixel delta per frame. Animated programmatic scrolls use the same transition
+/// with a longer duration, so wheel notches and programmatic requests merge into
+/// one motion instead of fighting over the offset.
+///
+/// The transition only tracks distance; the scroll container owns its offset
+/// and range, clamps every target before pushing it, and cancels an axis when
+/// its range shrinks under the motion.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ScrollTransition {
+    distance: Point<Pixels>,
+    delivered: Point<Pixels>,
+    ready: Point<Pixels>,
+    clock: Option<TransitionClock>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TransitionClock {
+    /// `None` until the first frame samples the motion, for pushes made
+    /// without access to the executor clock.
+    started_at: Option<Instant>,
+    duration: Duration,
+}
+
+impl ScrollTransition {
+    /// Adds `delta` to the motion without dropping the unfinished distance
+    /// of the previous one, restarting the ease over `duration`. Progress
+    /// accrued since the last frame is retained in `ready` and delivered by
+    /// the next call to [`Self::advance_at`].
+    pub(crate) fn push_at(&mut self, delta: Point<Pixels>, duration: Duration, now: Instant) {
+        let accrued = self.sample_at(now);
+        self.ready += accrued;
+        self.push(delta, duration);
+        if let Some(clock) = &mut self.clock {
+            clock.started_at = Some(now);
+        }
+    }
+
+    /// Like [`Self::push_at`], but the ease starts when the next frame
+    /// samples the motion.
+    pub(crate) fn push(&mut self, delta: Point<Pixels>, duration: Duration) {
+        if delta == Point::default() {
+            return;
+        }
+        self.distance = self.distance - self.delivered + delta;
+        self.delivered = Point::default();
+        self.clock = Some(TransitionClock {
+            started_at: None,
+            duration,
+        });
+    }
+
+    /// The distance accepted from input but not yet delivered. Adding it to the
+    /// container's offset yields the offset the motion is heading for.
+    pub(crate) fn pending_delta(&self) -> Point<Pixels> {
+        self.ready + self.distance - self.delivered
+    }
+
+    /// Returns the incremental distance due at `now`.
+    pub(crate) fn advance_at(&mut self, now: Instant) -> Point<Pixels> {
+        let ready = mem::take(&mut self.ready);
+        ready + self.sample_at(now)
+    }
+
+    /// Returns all remaining distance immediately and settles the transition.
+    pub(crate) fn finish(&mut self) -> Point<Pixels> {
+        mem::take(self).pending_delta()
+    }
+
+    /// Stops the transition without delivering its remaining distance.
+    pub(crate) fn cancel(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Stops one or both axes without disturbing motion that can still be
+    /// consumed on the other axis.
+    pub(crate) fn cancel_axes(&mut self, x: bool, y: bool) {
+        if x {
+            self.distance.x = Pixels::ZERO;
+            self.delivered.x = Pixels::ZERO;
+            self.ready.x = Pixels::ZERO;
+        }
+        if y {
+            self.distance.y = Pixels::ZERO;
+            self.delivered.y = Pixels::ZERO;
+            self.ready.y = Pixels::ZERO;
+        }
+        if self.pending_delta() == Point::default() {
+            *self = Self::default();
+        }
+    }
+
+    pub(crate) fn is_animating(&self) -> bool {
+        self.clock.is_some()
+    }
+
+    fn sample_at(&mut self, now: Instant) -> Point<Pixels> {
+        let Some(clock) = &mut self.clock else {
+            return Point::default();
+        };
+        let started_at = *clock.started_at.get_or_insert(now);
+        let elapsed = now.saturating_duration_since(started_at);
+        let progress = if clock.duration.is_zero() {
+            1.0
+        } else {
+            (elapsed.as_secs_f32() / clock.duration.as_secs_f32()).min(1.0)
+        };
+        let next = if progress >= 1.0 {
+            self.distance
+        } else {
+            self.distance * ease_out_cubic(progress)
+        };
+        let delta = next - self.delivered;
+        self.delivered = next;
+        if progress >= 1.0 {
+            self.distance = Point::default();
+            self.delivered = Point::default();
+            self.clock = None;
+        }
+        delta
+    }
+}
+
+fn ease_out_cubic(progress: f32) -> f32 {
+    1.0 - (1.0 - progress).powi(3)
 }
 
 /// Feel constants consumed by gesture recognizers. Provided on a best-effort

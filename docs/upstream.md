@@ -475,6 +475,30 @@ copy of the gpui-pre 0.3.11 crates first, and they are ported here onto the fork
   HLSL) grew from 80 to 112 bytes, with `fade` at byte 80 as a 16-byte-aligned vector, and
   assertions hold its size and offset. `list` paints none of its own style, so an app fades a
   wrapper around it. From GPUI Kit's vendored gpui-pre 0.3.11.
+- **Eased wheel notches and animated scrolls**, in `mhr-gpui`'s `src/gestures.rs`,
+  `src/elements/div.rs`, `src/elements/list.rs` and `src/elements/uniform_list.rs`. A notched
+  wheel, whose `ScrollEvent` carries `ScrollDelta::Lines`, jumped a few lines at a time. An
+  `overflow_scroll` div, with or without a `ScrollHandle`, a `uniform_list` and a `list` now ease
+  each notch to its offset over 80 ms, `1 - (1 - t)³`, one step a frame, through the
+  crate-private `ScrollTransition`. A notch during the motion extends its target without dropping
+  the distance not delivered yet, and restarts the ease. A target is clamped to the range when it
+  is pushed, and an axis whose range shrinks under the motion stops, so the offset never
+  overshoots. Pixel deltas, from trackpads and touch, stay immediate and stop a motion, as do
+  `set_offset`, `scroll_to_item`, `scroll_to_bottom`, the list's scrolls, scrollbar drags and
+  `ListState::reset`. `ScrollHandle::set_offset_animated`, `ScrollHandle::scroll_to_item_animated`,
+  `UniformListScrollHandle::scroll_to_item_animated` (after `track_scroll`),
+  `ListState::scroll_by_animated` and `ListState::scroll_to_reveal_item_animated` run on the same
+  transition over 200 ms, so notches and requests make one motion. Their targets are clamped to
+  the range of the last layout and judged from where a running motion is heading. Before the first
+  layout, and for a list motion that would cross rows of unknown height, they scroll at once.
+  `UniformListScrollHandle`'s strict and offset variants aren't animated. Under
+  `App::reduce_motion` the wheel and the animated scrolls move at once. A list's wheel handler
+  eases from where the list is when the notch comes, as its pixel scrolling does, and the
+  scrollbar follows the motion like any other scroll. A test that turns a notched wheel lets a
+  frame after 80 ms pass before it reads the offset. The tests in
+  `src/elements/eased_scroll_tests.rs` cover easing, notches that add up, clamping, the animated
+  scrolls and reduced motion. From GPUI Kit's vendored gpui-pre 0.3.11, which took the behavior
+  from the GPUI Box framework.
 
 ## The mobile crate
 

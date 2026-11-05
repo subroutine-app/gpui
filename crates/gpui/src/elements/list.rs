@@ -1,4 +1,5 @@
 // Modified by Mesa Hills Research, as docs/upstream.md in mesa-hills-research/gpui describes.
+// Modified by Subroutine, as docs/upstream.md in subroutine-app/gpui describes.
 //! A list element that can be used to render a large number of differently sized elements
 //! efficiently. Clients of this API need to ensure that elements outside of the scrolled
 //! area do not change their height for this element to function correctly. If your elements
@@ -9,13 +10,14 @@
 //! If all of your elements are the same height, see [`crate::UniformList`] for a simpler API
 
 use crate::{
-    AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, EntityId,
-    FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    Overflow, Pixels, Point, ScrollEvent, Size, Style, StyleRefinement, Styled, Window, point, px,
-    size,
+    ANIMATED_SCROLL_DURATION, AnyElement, App, AvailableSpace, Bounds, COARSE_SCROLL_DURATION,
+    ContentMask, DispatchPhase, Edges, Element, EntityId, FocusHandle, GlobalElementId, Hitbox,
+    HitboxBehavior, InspectorElementId, IntoElement, Overflow, Pixels, Point, ScrollEvent,
+    ScrollTransition, Size, Style, StyleRefinement, Styled, Window, point, px, size,
 };
 use collections::VecDeque;
 use refineable::Refineable as _;
+use scheduler::Instant;
 use std::{cell::RefCell, cmp::Ordering, ops::Range, rc::Rc};
 use sum_tree::{Bias, Dimensions, SumTree};
 
@@ -124,6 +126,9 @@ struct StateInner {
     estimates: bool,
     item_measurement_ready: Option<Box<dyn Fn(usize, &App) -> bool>>,
     follow_state: FollowState,
+    /// Vertical motion of coarse wheel notches and animated programmatic scrolls,
+    /// in offset convention (positive moves the content down).
+    transition: ScrollTransition,
 }
 
 /// Where the scrollbar's thumb was last shown. It holds the list's scroll
@@ -461,6 +466,7 @@ impl ListState {
             estimates: false,
             item_measurement_ready: None,
             follow_state: FollowState::default(),
+            transition: ScrollTransition::default(),
         })));
         state.splice(0..0, item_count);
         state
@@ -492,6 +498,7 @@ impl ListState {
         let old_count = {
             let state = &mut *self.0.borrow_mut();
             state.reset = true;
+            state.transition.cancel();
             state.measuring_behavior.reset();
             state.set_scroll_anchor(None);
             state.scrollbar_drag = None;
@@ -747,6 +754,7 @@ impl ListState {
 
         let current_offset = self.logical_scroll_top();
         let state = &mut *self.0.borrow_mut();
+        state.transition.cancel();
 
         if distance < px(0.) {
             state.follow_state.stop_following();
@@ -779,6 +787,7 @@ impl ListState {
     /// growing (e.g. during streaming).
     pub fn scroll_to_end(&self) {
         let state = &mut *self.0.borrow_mut();
+        state.transition.cancel();
         let item_count = state.items.summary().count;
         state.set_scroll_anchor(Some(ListOffset {
             item_ix: item_count,
@@ -801,6 +810,7 @@ impl ListState {
                 state.follow_state = FollowState::Normal;
             }
             FollowMode::Tail => {
+                state.transition.cancel();
                 state.follow_state = FollowState::Tail { is_following: true };
                 if matches!(mode, FollowMode::Tail) {
                     let item_count = state.items.summary().count;
@@ -851,6 +861,7 @@ impl ListState {
     /// Scroll the list to the given offset
     pub fn scroll_to(&self, mut scroll_top: ListOffset) {
         let state = &mut *self.0.borrow_mut();
+        state.transition.cancel();
         let item_count = state.items.summary().count;
         if scroll_top.item_ix >= item_count {
             scroll_top.item_ix = item_count;
@@ -867,6 +878,7 @@ impl ListState {
     /// Scroll the list to the given item, such that the item is fully visible.
     pub fn scroll_to_reveal_item(&self, ix: usize) {
         let state = &mut *self.0.borrow_mut();
+        state.transition.cancel();
 
         let mut scroll_top = state.logical_scroll_top();
         let height = state
@@ -894,6 +906,80 @@ impl ListState {
         }
 
         state.set_scroll_anchor(Some(scroll_top));
+    }
+
+    /// Like [`Self::scroll_by`], but eases over a short transition instead of
+    /// jumping. The destination is clamped to the scroll range measured by the
+    /// last layout, and a later wheel notch or animated request extends the
+    /// same motion. The motion starts on the next frame that draws the list;
+    /// under [`App::reduce_motion`] it completes in one frame.
+    ///
+    /// The distance is only known across rows whose height is known, so when
+    /// the motion would cross rows that were never measured and carry no size
+    /// hint (see [`Self::measure_all`] and [`Self::with_uniform_item_height`]),
+    /// or the list has not been laid out yet, it scrolls without animation.
+    pub fn scroll_by_animated(&self, distance: Pixels) {
+        let jump = {
+            let state = self.0.borrow();
+            match state.destination_scroll_top() {
+                Some(destination)
+                    if !state.crosses_unknown_heights(destination, destination + distance) =>
+                {
+                    None
+                }
+                _ => Some(distance - state.transition.pending_delta().y),
+            }
+        };
+        match jump {
+            Some(distance) => self.scroll_by(distance),
+            None => {
+                let mut state = self.0.borrow_mut();
+                if let Some(destination) = state.destination_scroll_top() {
+                    state.animate_scroll_top(destination + distance);
+                }
+            }
+        }
+    }
+
+    /// Like [`Self::scroll_to_reveal_item`], but eases over a short transition
+    /// instead of jumping, revealing the item relative to where any motion in
+    /// flight is heading. Under [`App::reduce_motion`] it completes in one
+    /// frame.
+    ///
+    /// The distance is only known across rows whose height is known, so when
+    /// the rows between the current position and the item were never measured
+    /// and carry no size hint (see [`Self::measure_all`] and
+    /// [`Self::with_uniform_item_height`]), or the list has not been laid out
+    /// yet, it scrolls without animation.
+    pub fn scroll_to_reveal_item_animated(&self, ix: usize) {
+        let mut state = self.0.borrow_mut();
+        let destination = state.destination_scroll_top().filter(|destination| {
+            let from = state.item_at(*destination);
+            !state.has_unknown_heights(from.min(ix)..from.max(ix) + 1)
+        });
+        let Some(destination) = destination else {
+            drop(state);
+            self.scroll_to_reveal_item(ix);
+            return;
+        };
+        let (item_top, ..) = state
+            .items
+            .find::<ListItemSummary, _>((), &Count(ix), Bias::Right);
+        let (item_end, ..) =
+            state
+                .items
+                .find::<ListItemSummary, _>((), &Count(ix + 1), Bias::Right);
+        let padding = state.last_padding.unwrap_or_default();
+        let viewport_height = state
+            .last_layout_bounds
+            .map_or(px(0.), |bounds| bounds.size.height);
+        let reveal_bottom = item_end.height + padding.top + padding.bottom - viewport_height;
+        let target = if item_top.height < destination {
+            item_top.height
+        } else {
+            destination.max(reveal_bottom)
+        };
+        state.animate_scroll_top(target);
     }
 
     /// Get the bounds for the given item in window coordinates, if it's
@@ -968,7 +1054,9 @@ impl ListState {
     /// click on the track asks. An offset at either end of the range scrolls
     /// to that end of the list.
     pub fn set_offset_from_scrollbar(&self, point: Point<Pixels>) {
-        self.0.borrow_mut().set_offset_from_scrollbar(point);
+        let mut state = self.0.borrow_mut();
+        state.transition.cancel();
+        state.set_offset_from_scrollbar(point);
     }
 
     /// Returns the maximum scroll offset for the scrollbar, which is the
@@ -1253,12 +1341,12 @@ impl StateInner {
             return;
         }
 
-        let padding = self.last_padding.unwrap_or_default();
-        let scroll_max =
-            (self.items.summary().height + padding.top + padding.bottom - height).max(px(0.));
-        let new_scroll_top = (self.scroll_top(scroll_top) - delta.y)
-            .max(px(0.))
-            .min(scroll_max);
+        let scroll_max = self.scroll_range(height);
+        let requested_scroll_top = self.scroll_top(scroll_top) - delta.y;
+        let new_scroll_top = requested_scroll_top.max(px(0.)).min(scroll_max);
+        if new_scroll_top != requested_scroll_top {
+            self.transition.cancel_axes(false, true);
+        }
 
         if self.alignment == ListAlignment::Bottom && new_scroll_top == scroll_max {
             self.set_scroll_anchor(None);
@@ -1319,6 +1407,91 @@ impl StateInner {
             Bias::Right,
         );
         start.height + logical_scroll_top.offset_in_item
+    }
+
+    /// The largest scroll top for a viewport of `height`, including padding.
+    fn scroll_range(&self, height: Pixels) -> Pixels {
+        let padding = self.last_padding.unwrap_or_default();
+        (self.items.summary().height + padding.top + padding.bottom - height).max(px(0.))
+    }
+
+    /// The index of the item at `scroll_top`, in the pixel space of known heights.
+    fn item_at(&self, scroll_top: Pixels) -> usize {
+        let (start, ..) =
+            self.items
+                .find::<ListItemSummary, _>((), &Height(scroll_top.max(px(0.))), Bias::Right);
+        start
+            .count
+            .min(self.items.summary().count.saturating_sub(1))
+    }
+
+    /// Whether any item in `items` has neither been measured nor given a size hint, and so
+    /// occupies no space in the scroll range yet.
+    fn has_unknown_heights(&self, items: Range<usize>) -> bool {
+        let mut cursor = self.items.cursor::<Count>(());
+        cursor.seek(&Count(items.start), Bias::Right);
+        let summary: ListItemSummary = cursor.summary(&Count(items.end), Bias::Right);
+        summary.unknown_count > 0
+    }
+
+    /// Whether moving the scroll top from `from` to `to` crosses items of unknown height,
+    /// including any past the measured end when `to` lies beyond it.
+    fn crosses_unknown_heights(&self, from: Pixels, to: Pixels) -> bool {
+        let height = self
+            .last_layout_bounds
+            .map_or(px(0.), |bounds| bounds.size.height);
+        let count = self.items.summary().count;
+        let end = if from.max(to) > self.scroll_range(height) {
+            count
+        } else {
+            self.item_at(from.max(to)) + 1
+        };
+        self.has_unknown_heights(self.item_at(from.min(to))..end.min(count))
+    }
+
+    /// The scroll top the list is heading for, counting motion still in flight,
+    /// or `None` before the first layout.
+    fn destination_scroll_top(&self) -> Option<Pixels> {
+        let height = self.last_layout_bounds?.size.height;
+        let current = self
+            .scroll_top(&self.logical_scroll_top())
+            .min(self.scroll_range(height));
+        Some(current - self.transition.pending_delta().y)
+    }
+
+    /// Eases from the destination to `target`, clamped to the last layout's
+    /// scroll range. Starts on the next frame the list prepaints.
+    fn animate_scroll_top(&mut self, target: Pixels) {
+        let Some(destination) = self.destination_scroll_top() else {
+            return;
+        };
+        let height = self
+            .last_layout_bounds
+            .map_or(px(0.), |bounds| bounds.size.height);
+        let target = target.max(px(0.)).min(self.scroll_range(height));
+        self.transition.push(
+            point(px(0.), destination - target),
+            ANIMATED_SCROLL_DURATION,
+        );
+    }
+
+    /// Feeds a coarse wheel notch into the transition, extending its target
+    /// within the scroll range. Returns whether the list will move.
+    fn push_coarse_scroll(&mut self, height: Pixels, delta: Pixels, now: Instant) -> bool {
+        if self.reset || delta == px(0.) {
+            return false;
+        }
+        let scroll_max = self.scroll_range(height);
+        let current = self.scroll_top(&self.logical_scroll_top()).min(scroll_max);
+        let projected = current - self.transition.pending_delta().y;
+        let target = (projected - delta).max(px(0.)).min(scroll_max);
+        let accepted = projected - target;
+        if accepted == px(0.) {
+            return false;
+        }
+        self.transition
+            .push_at(point(px(0.), accepted), COARSE_SCROLL_DURATION, now);
+        true
     }
 
     fn is_item_ready(&self, index: usize, cx: &App) -> bool {
@@ -2113,6 +2286,26 @@ impl Element for List {
         let state = &mut *self.state.0.borrow_mut();
         state.reset = false;
 
+        let delta = if cx.reduce_motion() {
+            state.transition.finish()
+        } else {
+            state.transition.advance_at(cx.background_executor().now())
+        };
+        if state.transition.is_animating() {
+            window.request_animation_frame();
+        }
+        if delta.y != px(0.) {
+            let scroll_top = state.logical_scroll_top();
+            state.scroll(
+                &scroll_top,
+                bounds.size.height,
+                delta,
+                window.current_view(),
+                window,
+                cx,
+            );
+        }
+
         let mut style = Style::default();
         style.refine(&self.style);
 
@@ -2160,6 +2353,7 @@ impl Element for List {
             ) {
                 Ok(layout) => break layout,
                 Err(autoscroll_request) => {
+                    state.transition.cancel();
                     state.set_scroll_anchor(Some(autoscroll_request));
                     autoscroll = false;
                 }
@@ -2193,9 +2387,19 @@ impl Element for List {
         let hitbox_id = prepaint.hitbox.id;
         window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && hitbox_id.should_handle_scroll(window) {
+                let state = &mut *list_state.0.borrow_mut();
+                if !event.delta.precise() && !cx.reduce_motion() {
+                    // A wheel notch eases toward its target; successive notches extend
+                    // the running motion, which prepaint delivers frame by frame.
+                    let delta = event.delta.pixel_delta(px(20.)).y;
+                    if state.push_coarse_scroll(height, delta, cx.background_executor().now()) {
+                        cx.notify(current_view);
+                    }
+                    return;
+                }
+                state.transition.cancel();
                 // From where the list is now, which is not where it was when
                 // it painted if something else scrolled it since.
-                let state = &mut *list_state.0.borrow_mut();
                 let scroll_top = state.logical_scroll_top();
                 state.scroll(
                     &scroll_top,

@@ -47,6 +47,12 @@ gpui no longer uses them.
   elements. A scene without filters renders as before.
 - `Styled::fade_edges` and `Filter::FadeEdges` fade an element to transparent across a band
   inside each edge, such as where a scrolling list meets its viewport.
+- A notched mouse wheel eases each notch over 80 ms in scrolling divs, uniform lists and lists,
+  instead of jumping, and notches in a row add up. Trackpads stay immediate.
+  `ScrollHandle::set_offset_animated`, `ScrollHandle::scroll_to_item_animated`,
+  `UniformListScrollHandle::scroll_to_item_animated`, `ListState::scroll_by_animated` and
+  `ListState::scroll_to_reveal_item_animated` scroll over 200 ms. Reduced motion moves at once.
+  A test that turns a notched wheel now lets 80 ms pass before it reads the offset.
 
 ## 0.1.9
 

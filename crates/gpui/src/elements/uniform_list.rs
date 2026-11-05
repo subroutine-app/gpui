@@ -1,3 +1,4 @@
+// Modified by Subroutine, as docs/upstream.md in subroutine-app/gpui describes.
 //! A scrollable list of elements with uniform height, optimized for large lists.
 //! Rather than use the full taffy layout system, uniform_list simply measures
 //! the first element and then lays out all remaining elements in a line based on that
@@ -5,10 +6,10 @@
 //! elements with uniform height.
 
 use crate::{
-    AnyElement, App, AvailableSpace, Bounds, ContentMask, Element, ElementId, Entity,
-    GlobalElementId, Hitbox, InspectorElementId, InteractiveElement, Interactivity, IntoElement,
-    IsZero, LayoutId, ListSizingBehavior, Overflow, Pixels, Point, ScrollHandle, Size,
-    StyleRefinement, Styled, Window, point, px, size,
+    ANIMATED_SCROLL_DURATION, AnyElement, App, AvailableSpace, Bounds, ContentMask, Element,
+    ElementId, Entity, GlobalElementId, Hitbox, InspectorElementId, InteractiveElement,
+    Interactivity, IntoElement, IsZero, LayoutId, ListSizingBehavior, Overflow, Pixels, Point,
+    ScrollHandle, Size, StyleRefinement, Styled, Window, point, px, size,
 };
 use smallvec::SmallVec;
 use std::{cell::RefCell, cmp, ops::Range, rc::Rc};
@@ -148,12 +149,38 @@ impl UniformListScrollHandle {
     /// If the item is out of view, it scrolls the minimum amount to bring it into view according
     /// to the strategy.
     pub fn scroll_to_item(&self, ix: usize, strategy: ScrollStrategy) {
-        self.0.borrow_mut().deferred_scroll_to_item = Some(DeferredScrollToItem {
-            item_index: ix,
-            strategy,
-            offset: 0,
-            scroll_strict: false,
-        });
+        self.defer_scroll(
+            DeferredScrollToItem {
+                item_index: ix,
+                strategy,
+                offset: 0,
+                scroll_strict: false,
+            },
+            false,
+        );
+    }
+
+    /// Like [`Self::scroll_to_item`], but eases to the item over a short
+    /// transition instead of jumping. A later wheel notch or animated request
+    /// extends the same motion, and visibility is judged against where any
+    /// motion in flight is heading. Under [`crate::App::reduce_motion`] it
+    /// jumps. Requires the list to [`UniformList::track_scroll`] this handle.
+    pub fn scroll_to_item_animated(&self, ix: usize, strategy: ScrollStrategy) {
+        self.defer_scroll(
+            DeferredScrollToItem {
+                item_index: ix,
+                strategy,
+                offset: 0,
+                scroll_strict: false,
+            },
+            true,
+        );
+    }
+
+    fn defer_scroll(&self, item: DeferredScrollToItem, animated: bool) {
+        let mut state = self.0.borrow_mut();
+        state.base_handle.set_deferred_scroll_animated(animated);
+        state.deferred_scroll_to_item = Some(item);
     }
 
     /// Scroll the list so that the given item index is at scroll strategy position.
@@ -161,12 +188,15 @@ impl UniformListScrollHandle {
     /// This uses strict scrolling: the item will always be scrolled to match the strategy position,
     /// even if it's already visible. Use this when you need precise positioning.
     pub fn scroll_to_item_strict(&self, ix: usize, strategy: ScrollStrategy) {
-        self.0.borrow_mut().deferred_scroll_to_item = Some(DeferredScrollToItem {
-            item_index: ix,
-            strategy,
-            offset: 0,
-            scroll_strict: true,
-        });
+        self.defer_scroll(
+            DeferredScrollToItem {
+                item_index: ix,
+                strategy,
+                offset: 0,
+                scroll_strict: true,
+            },
+            false,
+        );
     }
 
     /// Scroll the list to the given item index with an offset in number of items.
@@ -180,12 +210,15 @@ impl UniformListScrollHandle {
     /// - `ScrollStrategy::Center`: Shrinks from top, centers item in the reduced viewport
     /// - `ScrollStrategy::Bottom`: Shrinks from bottom, positions item at the new bottom
     pub fn scroll_to_item_with_offset(&self, ix: usize, strategy: ScrollStrategy, offset: usize) {
-        self.0.borrow_mut().deferred_scroll_to_item = Some(DeferredScrollToItem {
-            item_index: ix,
-            strategy,
-            offset,
-            scroll_strict: false,
-        });
+        self.defer_scroll(
+            DeferredScrollToItem {
+                item_index: ix,
+                strategy,
+                offset,
+                scroll_strict: false,
+            },
+            false,
+        );
     }
 
     /// Scroll the list so that the given item index is at the exact scroll strategy position with an offset.
@@ -204,12 +237,15 @@ impl UniformListScrollHandle {
         strategy: ScrollStrategy,
         offset: usize,
     ) {
-        self.0.borrow_mut().deferred_scroll_to_item = Some(DeferredScrollToItem {
-            item_index: ix,
-            strategy,
-            offset,
-            scroll_strict: true,
-        });
+        self.defer_scroll(
+            DeferredScrollToItem {
+                item_index: ix,
+                strategy,
+                offset,
+                scroll_strict: true,
+            },
+            false,
+        );
     }
 
     /// Check if the list is flipped vertically.
@@ -368,6 +404,7 @@ impl Element for UniformList {
         };
 
         let shared_scroll_offset = self.interactivity.scroll_offset.clone().unwrap();
+        let scroll_transition = self.interactivity.scroll_transition.clone();
         let item_height = longest_item_size.height;
         let shared_scroll_to_item = self.scroll_handle.as_mut().and_then(|handle| {
             let mut handle = handle.0.borrow_mut();
@@ -375,7 +412,11 @@ impl Element for UniformList {
                 item: padded_bounds.size,
                 contents: content_size,
             });
-            handle.deferred_scroll_to_item.take()
+            let animated = handle.base_handle.take_deferred_scroll_animated();
+            handle
+                .deferred_scroll_to_item
+                .take()
+                .map(|item| (item, animated))
         });
 
         self.interactivity.prepaint(
@@ -412,21 +453,32 @@ impl Element for UniformList {
                         scroll_offset.x = Pixels::ZERO;
                     }
 
-                    if let Some(DeferredScrollToItem {
-                        mut item_index,
-                        mut strategy,
-                        offset,
-                        scroll_strict,
-                    }) = shared_scroll_to_item
+                    if let Some((
+                        DeferredScrollToItem {
+                            mut item_index,
+                            mut strategy,
+                            offset,
+                            scroll_strict,
+                        },
+                        animated,
+                    )) = shared_scroll_to_item
                     {
                         if y_flipped {
                             item_index = self.item_count.saturating_sub(item_index + 1);
                         }
                         let list_height = padded_bounds.size.height;
                         let mut updated_scroll_offset = shared_scroll_offset.borrow_mut();
+                        // An animated request is judged against where motion in flight is
+                        // heading, so repeated requests during a transition stay consistent.
+                        let transition = scroll_transition.as_ref().filter(|_| animated);
+                        let from_y = updated_scroll_offset.y
+                            + transition.map_or(Pixels::ZERO, |transition| {
+                                transition.borrow().pending_delta().y
+                            });
+                        let mut target_y = from_y;
                         let item_top = item_height * item_index;
                         let item_bottom = item_top + item_height;
-                        let scroll_top = -updated_scroll_offset.y;
+                        let scroll_top = -from_y;
                         let offset_pixels = item_height * offset;
 
                         // is the selected item above/below currently visible items
@@ -446,7 +498,7 @@ impl Element for UniformList {
                                 (content_height - list_height).max(Pixels::ZERO);
                             match strategy {
                                 ScrollStrategy::Top => {
-                                    updated_scroll_offset.y = -(item_top - offset_pixels)
+                                    target_y = -(item_top - offset_pixels)
                                         .clamp(Pixels::ZERO, max_scroll_offset);
                                 }
                                 ScrollStrategy::Center => {
@@ -455,15 +507,35 @@ impl Element for UniformList {
                                     let viewport_height = list_height - offset_pixels;
                                     let viewport_center = offset_pixels + viewport_height / 2.0;
                                     let target_scroll_top = item_center - viewport_center;
-                                    updated_scroll_offset.y =
+                                    target_y =
                                         -target_scroll_top.clamp(Pixels::ZERO, max_scroll_offset);
                                 }
                                 ScrollStrategy::Bottom => {
-                                    updated_scroll_offset.y = -(item_bottom - list_height)
+                                    target_y = -(item_bottom - list_height)
                                         .clamp(Pixels::ZERO, max_scroll_offset);
                                 }
                                 ScrollStrategy::Nearest => {
                                     // Nearest, but the item is visible -> no scroll is required
+                                }
+                            }
+                        }
+
+                        if target_y != from_y {
+                            match transition {
+                                Some(transition) => {
+                                    // Resolved during prepaint, so the ease starts this frame.
+                                    transition.borrow_mut().push_at(
+                                        point(Pixels::ZERO, target_y - from_y),
+                                        ANIMATED_SCROLL_DURATION,
+                                        cx.background_executor().now(),
+                                    );
+                                    window.request_animation_frame();
+                                }
+                                None => {
+                                    if let Some(transition) = &scroll_transition {
+                                        transition.borrow_mut().cancel();
+                                    }
+                                    updated_scroll_offset.y = target_y;
                                 }
                             }
                         }

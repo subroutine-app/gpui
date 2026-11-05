@@ -1,3 +1,4 @@
+// Modified by Subroutine, as docs/upstream.md in subroutine-app/gpui describes.
 //! Div is the central, reusable element that most GPUI trees will be built from.
 //! It functions as a container for other elements, and provides a number of
 //! useful features for laying out and styling its children as well as binding
@@ -16,15 +17,16 @@
 //! constructed by combining these two systems into an all-in-one element.
 
 use crate::{
-    Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, BackGestureEvent, Bounds, ClickEvent,
-    DispatchPhase, Display, Element, ElementId, Entity, EntityId, ExternalDragPayload,
-    ExternalDragPayloadSource, FileDropEvent, FocusHandle, Global, GlobalElementId, Hitbox,
-    HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext, KeyDownEvent,
-    KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, LongPressEvent,
-    ModifiersChangedEvent, MouseButton, MouseClickEvent, MouseDownEvent, MouseExitEvent,
-    MouseMoveEvent, MousePressureEvent, MouseUpEvent, OngoingScroll, Overflow, ParentElement,
-    PinchEvent, Pixels, Point, Render, ScrollEvent, SharedString, Size, Style, StyleRefinement,
-    Styled, Task, TooltipId, TouchPhase, Visibility, Window, WindowControlArea, point, px, size,
+    ANIMATED_SCROLL_DURATION, Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App,
+    BackGestureEvent, Bounds, COARSE_SCROLL_DURATION, ClickEvent, DispatchPhase, Display, Element,
+    ElementId, Entity, EntityId, ExternalDragPayload, ExternalDragPayloadSource, FileDropEvent,
+    FocusHandle, Global, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, InspectorElementId,
+    IntoElement, IsZero, KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent,
+    LayoutId, LongPressEvent, ModifiersChangedEvent, MouseButton, MouseClickEvent, MouseDownEvent,
+    MouseExitEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent, OngoingScroll, Overflow,
+    ParentElement, PinchEvent, Pixels, Point, Render, ScrollEvent, ScrollTransition, SharedString,
+    Size, Style, StyleRefinement, Styled, Task, TooltipId, TouchPhase, Visibility, Window,
+    WindowControlArea, point, px, size,
 };
 use collections::HashMap;
 use gpui_util::ResultExt;
@@ -2197,6 +2199,7 @@ pub struct Interactivity {
     pub(crate) scroll_anchor: Option<ScrollAnchor>,
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
     pub(crate) ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
+    pub(crate) scroll_transition: Option<Rc<RefCell<ScrollTransition>>>,
     pub(crate) group: Option<SharedString>,
     /// The base style of the element, before any modifications are applied
     /// by focus, active, etc.
@@ -2324,6 +2327,7 @@ impl Interactivity {
                     let scroll_handle_state = scroll_handle.0.borrow();
                     self.scroll_offset = Some(scroll_handle_state.offset.clone());
                     self.ongoing_scroll = Some(scroll_handle_state.ongoing_scroll.clone());
+                    self.scroll_transition = Some(scroll_handle_state.transition.clone());
                 } else if (self.base_style.overflow.x == Some(Overflow::Scroll)
                     || self.base_style.overflow.y == Some(Overflow::Scroll))
                     && let Some(element_state) = element_state.as_mut()
@@ -2338,6 +2342,12 @@ impl Interactivity {
                         element_state
                             .ongoing_scroll
                             .get_or_insert_with(|| Rc::new(RefCell::new(OngoingScroll::default())))
+                            .clone(),
+                    );
+                    self.scroll_transition = Some(
+                        element_state
+                            .scroll_transition
+                            .get_or_insert_with(Rc::default)
                             .clone(),
                     );
                 }
@@ -2485,19 +2495,54 @@ impl Interactivity {
             || window.is_inspector_picking(cx)
     }
 
-    fn clamp_scroll_position(
-        &self,
-        bounds: Bounds<Pixels>,
-        style: &Style,
-        window: &mut Window,
-        _cx: &mut App,
-    ) -> Point<Pixels> {
+    fn scroll_max(&self, bounds: Bounds<Pixels>, style: &Style, window: &Window) -> Point<Pixels> {
         fn round_to_two_decimals(pixels: Pixels) -> Pixels {
             const ROUNDING_FACTOR: f32 = 100.0;
             (pixels * ROUNDING_FACTOR).round() / ROUNDING_FACTOR
         }
 
+        // Taffy lays the box out with the padding snapped to the device pixel
+        // grid (`to_taffy`); recomputed unsnapped, e.g. py_1 at a fractional
+        // rem size, it exceeds `bounds` and leaves the box scrollable by the
+        // sub-pixel difference.
+        let padding = style
+            .padding
+            .to_pixels(bounds.size.into(), window.rem_size())
+            .map(|edge| window.pixel_snap(*edge));
+        let padding_size = size(padding.left + padding.right, padding.top + padding.bottom);
+        // The floating point values produced by Taffy and ours often vary
+        // slightly after ~5 decimal places. This can lead to cases where after
+        // subtracting these, the container becomes scrollable for less than
+        // 0.00000x pixels. As we generally don't benefit from a precision that
+        // high for the maximum scroll, we round the scroll max to 2 decimal
+        // places here.
+        let padded_content_size = self.content_size + padding_size;
+        Point::from(padded_content_size - bounds.size)
+            .map(round_to_two_decimals)
+            .max(&Default::default())
+    }
+
+    fn clamp_scroll_position(
+        &self,
+        bounds: Bounds<Pixels>,
+        style: &Style,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Point<Pixels> {
         if let Some(scroll_offset) = self.scroll_offset.as_ref() {
+            if let Some(transition) = &self.scroll_transition {
+                let mut transition = transition.borrow_mut();
+                let delta = if cx.reduce_motion() {
+                    transition.finish()
+                } else {
+                    transition.advance_at(cx.background_executor().now())
+                };
+                if transition.is_animating() {
+                    window.request_animation_frame();
+                }
+                *scroll_offset.borrow_mut() += delta;
+            }
+
             let mut scroll_to_bottom = false;
             let mut tracked_scroll_handle = self
                 .tracked_scroll_handle
@@ -2508,35 +2553,24 @@ impl Interactivity {
                 scroll_to_bottom = mem::take(&mut scroll_handle_state.scroll_to_bottom);
             }
 
-            let rem_size = window.rem_size();
-            // Taffy lays the box out with the padding snapped to the device pixel
-            // grid (`to_taffy`); recomputed unsnapped, e.g. py_1 at a fractional
-            // rem size, it exceeds `bounds` and leaves the box scrollable by the
-            // sub-pixel difference.
-            let padding = style
-                .padding
-                .to_pixels(bounds.size.into(), rem_size)
-                .map(|edge| window.pixel_snap(*edge));
-            let padding_size = size(padding.left + padding.right, padding.top + padding.bottom);
-            // The floating point values produced by Taffy and ours often vary
-            // slightly after ~5 decimal places. This can lead to cases where after
-            // subtracting these, the container becomes scrollable for less than
-            // 0.00000x pixels. As we generally don't benefit from a precision that
-            // high for the maximum scroll, we round the scroll max to 2 decimal
-            // places here.
-            let padded_content_size = self.content_size + padding_size;
-            let scroll_max = Point::from(padded_content_size - bounds.size)
-                .map(round_to_two_decimals)
-                .max(&Default::default());
+            let scroll_max = self.scroll_max(bounds, style, window);
             // Clamp scroll offset in case scroll max is smaller now (e.g., if children
             // were removed or the bounds became larger).
             let mut scroll_offset = scroll_offset.borrow_mut();
+            let unclamped = *scroll_offset;
 
             scroll_offset.x = scroll_offset.x.clamp(-scroll_max.x, px(0.));
             if scroll_to_bottom {
                 scroll_offset.y = -scroll_max.y;
             } else {
                 scroll_offset.y = scroll_offset.y.clamp(-scroll_max.y, px(0.));
+            }
+            // Motion that ran into the range edge has nowhere left to go.
+            if let Some(transition) = &self.scroll_transition {
+                transition.borrow_mut().cancel_axes(
+                    scroll_offset.x != unclamped.x,
+                    scroll_offset.y != unclamped.y,
+                );
             }
 
             if let Some(mut scroll_handle_state) = tracked_scroll_handle {
@@ -2646,7 +2680,9 @@ impl Interactivity {
                                                 window,
                                                 cx,
                                             );
-                                            self.paint_scroll_listener(hitbox, &style, window, cx);
+                                            self.paint_scroll_listener(
+                                                hitbox, bounds, &style, window, cx,
+                                            );
                                         }
 
                                         self.paint_keyboard_listeners(window, cx);
@@ -3385,12 +3421,15 @@ impl Interactivity {
     fn paint_scroll_listener(
         &self,
         hitbox: &Hitbox,
+        bounds: Bounds<Pixels>,
         style: &Style,
         window: &mut Window,
         _cx: &mut App,
     ) {
         if let Some(scroll_offset) = self.scroll_offset.clone() {
+            let scroll_max = self.scroll_max(bounds, style, window);
             let ongoing_scroll = self.ongoing_scroll.clone();
+            let scroll_transition = self.scroll_transition.clone();
             let overflow = style.overflow;
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
             let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
@@ -3437,10 +3476,37 @@ impl Interactivity {
                             delta_x = Pixels::ZERO;
                         }
                     }
-                    scroll_offset.y += delta_y;
-                    scroll_offset.x += delta_x;
-                    if *scroll_offset != old_scroll_offset {
-                        cx.notify(current_view);
+                    let requested = point(delta_x, delta_y);
+
+                    match &scroll_transition {
+                        Some(transition) if !event.delta.precise() && !cx.reduce_motion() => {
+                            // A wheel notch eases toward its target. Successive notches extend
+                            // the running motion's target, which stays inside the scroll range.
+                            let mut transition = transition.borrow_mut();
+                            let projected = *scroll_offset + transition.pending_delta();
+                            let target = point(
+                                (projected.x + requested.x).clamp(-scroll_max.x, px(0.)),
+                                (projected.y + requested.y).clamp(-scroll_max.y, px(0.)),
+                            );
+                            let accepted = target - projected;
+                            if !accepted.is_zero() {
+                                transition.push_at(
+                                    accepted,
+                                    COARSE_SCROLL_DURATION,
+                                    cx.background_executor().now(),
+                                );
+                                cx.notify(current_view);
+                            }
+                        }
+                        transition => {
+                            if let Some(transition) = transition {
+                                transition.borrow_mut().cancel();
+                            }
+                            *scroll_offset += requested;
+                            if *scroll_offset != old_scroll_offset {
+                                cx.notify(current_view);
+                            }
+                        }
                     }
                 }
             });
@@ -3683,6 +3749,7 @@ pub struct InteractiveElementState {
     pub(crate) pending_keyboard_down: Option<Rc<RefCell<Option<u64>>>>,
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
     ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
+    scroll_transition: Option<Rc<RefCell<ScrollTransition>>>,
     pub(crate) active_tooltip: Option<Rc<RefCell<Option<ActiveTooltip>>>>,
     long_press_tooltip_active: Option<Rc<Cell<bool>>>,
 }
@@ -4282,18 +4349,88 @@ impl ScrollAnchor {
 struct ScrollHandleState {
     offset: Rc<RefCell<Point<Pixels>>>,
     ongoing_scroll: Rc<RefCell<OngoingScroll>>,
+    transition: Rc<RefCell<ScrollTransition>>,
     bounds: Bounds<Pixels>,
     max_offset: Point<Pixels>,
     child_bounds: Vec<Bounds<Pixels>>,
     scroll_to_bottom: bool,
     overflow: Point<Overflow>,
     active_item: Option<ScrollActiveItem>,
+    /// Whether the owning list's pending deferred scroll eases; see
+    /// [`crate::UniformListScrollHandle::scroll_to_item_animated`].
+    deferred_scroll_animated: bool,
+}
+
+impl ScrollHandleState {
+    /// The offset the element is heading for: the current offset plus any
+    /// motion still in flight.
+    fn destination(&self) -> Point<Pixels> {
+        *self.offset.borrow() + self.transition.borrow().pending_delta()
+    }
+
+    fn clamp_to_range(&self, offset: Point<Pixels>) -> Point<Pixels> {
+        point(
+            offset.x.clamp(-self.max_offset.x, px(0.)),
+            offset.y.clamp(-self.max_offset.y, px(0.)),
+        )
+    }
+
+    /// Eases from the current destination to `target`, which must already lie
+    /// in the scroll range. Starts on the next frame the element prepaints.
+    fn animate_to(&self, target: Point<Pixels>) {
+        let delta = target - self.destination();
+        self.transition
+            .borrow_mut()
+            .push(delta, ANIMATED_SCROLL_DURATION);
+    }
+
+    fn jump_to(&self, target: Point<Pixels>) {
+        self.transition.borrow_mut().cancel();
+        *self.offset.borrow_mut() = target;
+    }
+
+    /// The offset that reveals `item` according to `strategy`, starting from `from`.
+    fn reveal_offset(
+        &self,
+        item: Bounds<Pixels>,
+        strategy: ScrollStrategy,
+        from: Point<Pixels>,
+    ) -> Point<Pixels> {
+        let viewport = self.bounds;
+        let mut offset = from;
+        match strategy {
+            ScrollStrategy::FirstVisible => {
+                if self.overflow.y == Overflow::Scroll {
+                    if item.size.height > viewport.size.height
+                        || item.top() + offset.y < viewport.top()
+                    {
+                        offset.y = viewport.top() - item.top();
+                    } else if item.bottom() + offset.y > viewport.bottom() {
+                        offset.y = viewport.bottom() - item.bottom();
+                    }
+                }
+            }
+            ScrollStrategy::Top => {
+                offset.y = viewport.top() - item.top();
+            }
+        }
+
+        if self.overflow.x == Overflow::Scroll {
+            if item.size.width > viewport.size.width || item.left() + offset.x < viewport.left() {
+                offset.x = viewport.left() - item.left();
+            } else if item.right() + offset.x > viewport.right() {
+                offset.x = viewport.right() - item.right();
+            }
+        }
+        offset
+    }
 }
 
 #[derive(Default, Debug, Clone, Copy)]
 struct ScrollActiveItem {
     index: usize,
     strategy: ScrollStrategy,
+    animated: bool,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -4385,6 +4522,19 @@ impl ScrollHandle {
         state.active_item = Some(ScrollActiveItem {
             index: ix,
             strategy: ScrollStrategy::default(),
+            animated: false,
+        });
+    }
+
+    /// Like [`Self::scroll_to_item`], but eases to the revealing offset over a
+    /// short transition instead of jumping. Under [`App::reduce_motion`] it
+    /// jumps.
+    pub fn scroll_to_item_animated(&self, ix: usize) {
+        let mut state = self.0.borrow_mut();
+        state.active_item = Some(ScrollActiveItem {
+            index: ix,
+            strategy: ScrollStrategy::default(),
+            animated: true,
         });
     }
 
@@ -4395,6 +4545,7 @@ impl ScrollHandle {
         state.active_item = Some(ScrollActiveItem {
             index: ix,
             strategy: ScrollStrategy::Top,
+            animated: false,
         });
     }
 
@@ -4407,60 +4558,58 @@ impl ScrollHandle {
         let Some(active_item) = state.active_item else {
             return;
         };
-
-        let active_item = match state.child_bounds.get(active_item.index) {
-            Some(bounds) => {
-                let mut scroll_offset = state.offset.borrow_mut();
-
-                match active_item.strategy {
-                    ScrollStrategy::FirstVisible => {
-                        if state.overflow.y == Overflow::Scroll {
-                            let child_height = bounds.size.height;
-                            let viewport_height = state.bounds.size.height;
-                            if child_height > viewport_height {
-                                scroll_offset.y = state.bounds.top() - bounds.top();
-                            } else if bounds.top() + scroll_offset.y < state.bounds.top() {
-                                scroll_offset.y = state.bounds.top() - bounds.top();
-                            } else if bounds.bottom() + scroll_offset.y > state.bounds.bottom() {
-                                scroll_offset.y = state.bounds.bottom() - bounds.bottom();
-                            }
-                        }
-                    }
-                    ScrollStrategy::Top => {
-                        scroll_offset.y = state.bounds.top() - bounds.top();
-                    }
-                }
-
-                if state.overflow.x == Overflow::Scroll {
-                    let child_width = bounds.size.width;
-                    let viewport_width = state.bounds.size.width;
-                    if child_width > viewport_width {
-                        scroll_offset.x = state.bounds.left() - bounds.left();
-                    } else if bounds.left() + scroll_offset.x < state.bounds.left() {
-                        scroll_offset.x = state.bounds.left() - bounds.left();
-                    } else if bounds.right() + scroll_offset.x > state.bounds.right() {
-                        scroll_offset.x = state.bounds.right() - bounds.right();
-                    }
-                }
-                None
-            }
-            None => Some(active_item),
+        let Some(item) = state.child_bounds.get(active_item.index).copied() else {
+            return;
         };
-        state.active_item = active_item;
+        state.active_item = None;
+
+        if active_item.animated {
+            let target = state.reveal_offset(item, active_item.strategy, state.destination());
+            state.animate_to(state.clamp_to_range(target));
+        } else {
+            let target = state.reveal_offset(item, active_item.strategy, *state.offset.borrow());
+            state.jump_to(target);
+        }
     }
 
     /// Scrolls to the bottom.
     pub fn scroll_to_bottom(&self) {
         let mut state = self.0.borrow_mut();
+        state.transition.borrow_mut().cancel();
         state.scroll_to_bottom = true;
     }
 
     /// Set the offset explicitly. The offset is the distance from the top left of the
     /// parent container to the top left of the first child.
     /// As you scroll further down the offset becomes more negative.
+    ///
+    /// Stops any scroll motion in flight, including a coarse wheel transition.
     pub fn set_offset(&self, position: Point<Pixels>) {
+        self.0.borrow().jump_to(position);
+    }
+
+    /// Like [`Self::set_offset`], but eases to `position` over a short
+    /// transition instead of jumping. The target is clamped to the scroll range
+    /// measured by the last layout, and a later wheel notch or animated request
+    /// extends the same motion. The motion starts on the next frame that draws
+    /// the element, so notify its view as you would after [`Self::set_offset`].
+    /// Before the element is first laid out, and under [`App::reduce_motion`],
+    /// the offset is applied without animation.
+    pub fn set_offset_animated(&self, position: Point<Pixels>) {
         let state = self.0.borrow();
-        *state.offset.borrow_mut() = position;
+        if state.bounds.size.is_zero() {
+            state.jump_to(position);
+        } else {
+            state.animate_to(state.clamp_to_range(position));
+        }
+    }
+
+    pub(crate) fn set_deferred_scroll_animated(&self, animated: bool) {
+        self.0.borrow_mut().deferred_scroll_animated = animated;
+    }
+
+    pub(crate) fn take_deferred_scroll_animated(&self) -> bool {
+        mem::take(&mut self.0.borrow_mut().deferred_scroll_animated)
     }
 
     /// Get the logical scroll top, based on a child index and a pixel offset.
@@ -4498,6 +4647,10 @@ impl ScrollHandle {
         self.0.borrow().child_bounds.len()
     }
 }
+
+#[cfg(test)]
+#[path = "eased_scroll_tests.rs"]
+mod eased_scroll_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4952,6 +5105,7 @@ mod tests {
             state.active_item = Some(ScrollActiveItem {
                 index: 0,
                 strategy: ScrollStrategy::default(),
+                animated: false,
             });
         }
 
@@ -4971,6 +5125,7 @@ mod tests {
             state.active_item = Some(ScrollActiveItem {
                 index: 0,
                 strategy: ScrollStrategy::default(),
+                animated: false,
             });
         }
 
