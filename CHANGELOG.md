@@ -8,10 +8,10 @@ detail.
 ## 0.2.0
 
 Brings in gpui-pre 0.3.11, from Zed `f816e1f9` (2026-11-01), the snapshot GPUI Kit 0.9.0 is built
-against. Published as all 25 crates, which start the 0.2 line together, so a requirement such as
-`version = "0.1"` stays on 0.1.x and an app moves to `version = "0.2"`. `mhr-gpui-ios`, the iOS
-platform that gpui-pre 0.3.11 adds, is new. `mhr-perf` and `mhr-util-macros` end at 0.1.0, since
-gpui no longer uses them.
+against. It covers all 25 publishable crates, which start the 0.2 line together, so a requirement
+such as `version = "0.1"` stays on 0.1.x and an app moves to `version = "0.2"`. It isn't on
+crates.io yet, and apps take it from git. `mhr-gpui-ios`, the iOS platform that gpui-pre 0.3.11
+adds, is new. `mhr-perf` and `mhr-util-macros` end at 0.1.0, since gpui no longer uses them.
 
 ### Upstream
 

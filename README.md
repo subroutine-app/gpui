@@ -1,5 +1,29 @@
 # gpui
 
+This is [Subroutine](https://github.com/subroutine-app)'s fork of
+[Mesa Hills Research's GPUI fork](https://github.com/mesa-hills-research/gpui), on **gpui-pre
+0.3.11** (Zed [`f816e1f9`](https://github.com/zed-industries/zed/commit/f816e1f9263e3a8ef63c4baaa02e1441ce1c6038)),
+the snapshot GPUI Kit 0.9.0 is built against. It keeps Mesa's crate names (`mhr-gpui` and its
+siblings, at 0.2.0) and Mesa's changes, and adds:
+
+- blur of an element and of what is behind it (`Styled::blur`, `Styled::backdrop_blur`), and
+  faded edges (`Styled::fade_edges`), on Metal, wgpu and DirectX
+- eased wheel notches and animated scrolling (`ScrollHandle::set_offset_animated`,
+  `ListState::scroll_to_reveal_item_animated` and others)
+- drags that wait for a held press (`drag_hold`)
+- native toolbar window chrome on macOS 26 (`TitlebarOptions::toolbar_style`)
+- `Window::rendered_scene` for tests, and serializable `Edges`
+
+GPUI Kit vendored most of these into its copy of gpui-pre first.
+[docs/upstream.md](docs/upstream.md#subroutines-changes) describes each of them, and where the
+features GPUI Kit's copy shares with Mesa's differ. Depend on it from git by package name:
+
+```toml
+gpui = { git = "https://github.com/subroutine-app/gpui", rev = "<commit>", package = "mhr-gpui" }
+```
+
+Mesa Hills Research's README follows.
+
 This repository is Mesa Hills Research's fork of [GPUI](https://www.gpui.rs), the GPU-accelerated
 UI framework of the [Zed](https://github.com/zed-industries/zed) editor, together with a mobile
 platform for iOS and Android. GPUI fixes and the mobile work live here, next to each other, and

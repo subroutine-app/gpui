@@ -118,7 +118,7 @@ Version 0.1.9 covers nine, since only `mhr-gpui` changed and the other eight pin
 `mhr-gpui-macros` pins nothing that changed, so it stays at 0.1.8 and the others pin it there.
 The rest stay at 0.1.0, and the new versions pin them at `=0.1.0`.
 A new gpui-pre release changes every crate, so it starts a new minor line for all of them.
-Version 0.2.0 brings in gpui-pre 0.3.11 and covers all 25 published crates, `mhr-gpui-ios`
+Version 0.2.0 brings in gpui-pre 0.3.11 and covers all 25 publishable crates, `mhr-gpui-ios`
 among them for the first time, and `mhr-perf` and `mhr-util-macros` end at 0.1.0.
 `git diff --stat <last release> HEAD -- crates tooling` shows what changed. Publish the crates of
 the release by name, since cargo refuses a version that's already on crates.io. The command below
@@ -536,6 +536,19 @@ copy of the gpui-pre 0.3.11 crates first, and they are ported here onto the fork
   [Apple's WWDC25 AppKit session](https://developer.apple.com/videos/play/wwdc2025/310/)
   describes toolbar-dependent window corners. `mhr-gpui-apple`'s copy of `platform.rs` under
   `vendor/gpui` follows it.
+
+GPUI Kit's vendored copy also carried paint animations, a modifier observer and glyph colors at
+paint time, which it ported from Mesa Hills Research's `mhr-gpui` 0.1.9. This fork keeps Mesa's
+own, which differ from that copy in these ways:
+
+- `Window::observe_modifiers_changed` takes `FnMut(&ModifiersChangedEvent, &mut Window, &mut App)`,
+  where the copy took `FnMut(&mut Window, &mut App)`, and calls it after the elements have heard
+  the change, even if one stopped it, where the copy called it before them.
+- `WrappedLine::paint_with_colors` isn't here. `TextLayout::paint_foreground_with_colors` has the
+  same signature and also leaves the layout, underlines, strikethroughs and run backgrounds as
+  they were. Here a glyph of several characters, such as a ligature, takes the color of its first
+  one.
+- `PaintEffect`, `AnimationExt::with_paint_animation` and `PaintAnimationElement` are the same.
 
 ## The mobile crate
 
